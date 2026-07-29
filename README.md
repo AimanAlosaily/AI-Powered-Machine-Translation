@@ -1,4 +1,4 @@
-# Verta Offline
+# Verta
 
 Verta is a private, installable translation workspace for documents and
 images. It uses the desktop browser's built-in translation model, so there is
