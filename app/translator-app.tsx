@@ -3,22 +3,25 @@
 import {
   AlertCircle,
   ArrowRight,
-  BookOpen,
   Check,
   CheckCircle2,
   Copy,
   Download,
+  DownloadCloud,
   FileImage,
   FileText,
-  KeyRound,
+  HardDrive,
   Languages,
   LoaderCircle,
   LockKeyhole,
+  MonitorCheck,
+  PackageCheck,
   RotateCcw,
   ScanText,
   ShieldCheck,
   Sparkles,
   UploadCloud,
+  WifiOff,
   X,
 } from "lucide-react";
 import {
@@ -32,7 +35,7 @@ import {
 import {
   getFileExtension,
   getFullTranslation,
-  getSafetyIdentifier,
+  getPairAvailability,
   MAX_FILE_SIZE,
   translateFile,
   TranslationResult,
@@ -47,13 +50,11 @@ const LANGUAGES = [
   ["German", "de"],
   ["Italian", "it"],
   ["Portuguese", "pt"],
-  ["Brazilian Portuguese", "pt-BR"],
-  ["Chinese (Simplified)", "zh-CN"],
-  ["Chinese (Traditional)", "zh-TW"],
+  ["Chinese (Simplified)", "zh"],
+  ["Chinese (Traditional)", "zh-Hant"],
   ["Japanese", "ja"],
   ["Korean", "ko"],
   ["Hindi", "hi"],
-  ["Urdu", "ur"],
   ["Turkish", "tr"],
   ["Russian", "ru"],
   ["Ukrainian", "uk"],
@@ -64,20 +65,37 @@ const LANGUAGES = [
   ["Danish", "da"],
   ["Finnish", "fi"],
   ["Greek", "el"],
-  ["Hebrew", "he"],
-  ["Persian", "fa"],
+  ["Hebrew", "iw"],
   ["Indonesian", "id"],
-  ["Malay", "ms"],
   ["Thai", "th"],
   ["Vietnamese", "vi"],
-  ["Swahili", "sw"],
+  ["Bulgarian", "bg"],
+  ["Bengali", "bn"],
+  ["Czech", "cs"],
+  ["Croatian", "hr"],
+  ["Hungarian", "hu"],
+  ["Romanian", "ro"],
+  ["Slovak", "sk"],
+  ["Slovenian", "sl"],
+  ["Tamil", "ta"],
+  ["Telugu", "te"],
 ] as const;
 
-const RTL_CODES = new Set(["ar", "fa", "he", "ur"]);
+const RTL_CODES = new Set(["ar", "iw"]);
 const ACCEPTED_FILES =
-  ".pdf,.doc,.docx,.rtf,.odt,.txt,.md,.csv,.ppt,.pptx,.png,.jpg,.jpeg,.webp";
+  ".pdf,.docx,.rtf,.odt,.txt,.md,.csv,.pptx,.png,.jpg,.jpeg,.webp";
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 type Phase = "idle" | "reading" | "translating" | "done" | "error";
+type PairStatus =
+  | Availability
+  | "checking"
+  | "unsupported";
+
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+};
 
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
@@ -104,36 +122,124 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function statusCopy(status: PairStatus, online: boolean) {
+  if (status === "unsupported") {
+    return {
+      title: "Desktop Chrome 138+ required",
+      detail: "This browser does not expose an on-device translation model.",
+    };
+  }
+  if (status === "unavailable") {
+    return {
+      title: "Pair unavailable",
+      detail: "Choose another source and target language combination.",
+    };
+  }
+  if (status === "available") {
+    return {
+      title: "Language pair ready offline",
+      detail: "The browser already has everything needed for this pair.",
+    };
+  }
+  if (status === "downloading") {
+    return {
+      title: "Language pack is downloading",
+      detail: "Keep this tab open until the one-time setup finishes.",
+    };
+  }
+  if (status === "downloadable") {
+    return {
+      title: online ? "One-time language download needed" : "Go online once",
+      detail: online
+        ? "Your first translation downloads this pair; later use works offline."
+        : "This pair has not been prepared on this device yet.",
+    };
+  }
+  return {
+    title: "Checking this device",
+    detail: "Looking for a compatible on-device translation model.",
+  };
+}
+
 export function TranslatorApp() {
   const [file, setFile] = useState<File | null>(null);
+  const [sourceLanguage, setSourceLanguage] = useState("English");
   const [targetLanguage, setTargetLanguage] = useState("Arabic");
-  const [audience, setAudience] = useState("General");
-  const [tone, setTone] = useState("Match the original");
-  const [context, setContext] = useState("");
   const [glossary, setGlossary] = useState("");
-  const [apiKey, setApiKey] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
+  const [progress, setProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<TranslationResult | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [pairStatus, setPairStatus] = useState<PairStatus>("checking");
+  const [isOnline, setIsOnline] = useState(true);
+  const [installPrompt, setInstallPrompt] =
+    useState<InstallPromptEvent | null>(null);
+  const [isInstalled, setIsInstalled] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const controllerRef = useRef<AbortController | null>(null);
 
+  const sourceCode =
+    LANGUAGES.find(([name]) => name === sourceLanguage)?.[1] ?? "en";
   const targetCode =
-    LANGUAGES.find(([name]) => name === targetLanguage)?.[1] ?? "en";
-  const isRtl = RTL_CODES.has(targetCode.split("-")[0]);
+    LANGUAGES.find(([name]) => name === targetLanguage)?.[1] ?? "ar";
+  const isRtl = RTL_CODES.has(targetCode);
   const isWorking = phase === "reading" || phase === "translating";
-
-  const progress = phase === "reading" ? 32 : phase === "translating" ? 72 : 0;
   const translationText = useMemo(
     () => (result ? getFullTranslation(result) : ""),
     [result],
   );
+  const engineCopy = statusCopy(pairStatus, isOnline);
 
   useEffect(() => {
-    return () => controllerRef.current?.abort();
+    setIsOnline(navigator.onLine);
+    setIsInstalled(
+      window.matchMedia("(display-mode: standalone)").matches,
+    );
+
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    const handleInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPromptEvent);
+    };
+    const handleInstalled = () => {
+      setInstallPrompt(null);
+      setIsInstalled(true);
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("beforeinstallprompt", handleInstallPrompt);
+    window.addEventListener("appinstalled", handleInstalled);
+
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.register(`${BASE_PATH}/sw.js`, {
+        scope: `${BASE_PATH || ""}/`,
+      });
+    }
+
+    return () => {
+      controllerRef.current?.abort();
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("beforeinstallprompt", handleInstallPrompt);
+      window.removeEventListener("appinstalled", handleInstalled);
+    };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    setPairStatus("checking");
+    void getPairAvailability(sourceCode, targetCode).then((availability) => {
+      if (active) setPairStatus(availability);
+    });
+    return () => {
+      active = false;
+    };
+  }, [sourceCode, targetCode]);
 
   const chooseFile = (nextFile?: File) => {
     if (!nextFile) return;
@@ -172,32 +278,43 @@ export function TranslatorApp() {
       setPhase("error");
       return;
     }
-    if (!apiKey.trim()) {
-      setError("Enter your OpenAI API key to start translating.");
-      setPhase("error");
-      return;
-    }
 
     const controller = new AbortController();
     controllerRef.current = controller;
     setError("");
     setResult(null);
+    setProgress(2);
+    setProgressMessage("Starting the on-device engine");
     setPhase("reading");
 
     try {
-      await new Promise((resolve) => window.setTimeout(resolve, 350));
-      setPhase("translating");
       const nextResult = await translateFile({
         file,
-        apiKey,
-        options: { targetLanguage, audience, tone, context, glossary },
-        safetyIdentifier: getSafetyIdentifier(),
+        options: {
+          sourceLanguage,
+          sourceCode,
+          targetLanguage,
+          targetCode,
+          glossary,
+        },
         signal: controller.signal,
+        onProgress(update) {
+          setProgress(update.progress);
+          setProgressMessage(update.message);
+          setPhase(
+            /translat|language pack/i.test(update.message)
+              ? "translating"
+              : "reading",
+          );
+        },
       });
       setResult(nextResult);
       setPhase("done");
     } catch (translationError) {
-      if (translationError instanceof DOMException && translationError.name === "AbortError") {
+      if (
+        translationError instanceof DOMException &&
+        translationError.name === "AbortError"
+      ) {
         setPhase("idle");
         return;
       }
@@ -223,8 +340,16 @@ export function TranslatorApp() {
     setResult(null);
     setError("");
     setPhase("idle");
+    setProgress(0);
     setCopied(false);
     if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const installApp = async () => {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    if (choice.outcome === "accepted") setInstallPrompt(null);
   };
 
   const copyTranslation = async () => {
@@ -287,9 +412,9 @@ export function TranslatorApp() {
 
     const document = new Document({
       sections: [{ properties: {}, children }],
-      creator: "Verta",
+      creator: "Verta Offline",
       title: result.title,
-      description: `Translated into ${result.targetLanguage} with Verta`,
+      description: `Translated offline into ${result.targetLanguage} with Verta`,
     });
 
     const blob = await Packer.toBlob(document);
@@ -309,44 +434,56 @@ export function TranslatorApp() {
           <span>VERTA</span>
         </a>
         <div className="nav-center" aria-label="Product attributes">
-          <span>Context-aware</span>
-          <span>30+ languages</span>
-          <span>Local-first</span>
+          <span>No keys</span>
+          <span>Device-only</span>
+          <span>Offline after setup</span>
         </div>
-        <span className="privacy-pill">
-          <LockKeyhole size={14} aria-hidden="true" />
-          Your key stays in this tab
-        </span>
+        {installPrompt && !isInstalled ? (
+          <button
+            className="install-button"
+            type="button"
+            onClick={installApp}
+          >
+            <DownloadCloud size={14} aria-hidden="true" />
+            Install Verta
+          </button>
+        ) : (
+          <span className="privacy-pill">
+            <LockKeyhole size={14} aria-hidden="true" />
+            No keys · no uploads
+          </span>
+        )}
       </nav>
 
       <section className="hero" id="top">
         <div className="hero-copy">
           <div className="eyebrow">
             <Sparkles size={15} aria-hidden="true" />
-            Translation that reads the room
+            Private translation, built in
           </div>
           <h1>
             Meaning in.
             <br />
-            <span>Meaning out.</span>
+            <span>Nothing out.</span>
           </h1>
           <p className="hero-lede">
-            Verta reads the full document before it translates—so the language
-            comes back natural, consistent, and right for its audience.
+            Verta reads and translates on your device with the language model
+            already built into supported desktop browsers. No account, API key,
+            or file upload.
           </p>
 
           <div className="proof-strip">
             <div>
               <strong>01</strong>
-              <span>Reads context</span>
+              <span>Local file reading</span>
             </div>
             <div>
               <strong>02</strong>
-              <span>Resolves terminology</span>
+              <span>Browser language packs</span>
             </div>
             <div>
               <strong>03</strong>
-              <span>Checks the result</span>
+              <span>Works disconnected</span>
             </div>
           </div>
 
@@ -427,7 +564,9 @@ export function TranslatorApp() {
                 <UploadCloud size={26} aria-hidden="true" />
               </span>
               <strong>Drop a document or image</strong>
-              <span>or click to browse · up to {MAX_FILE_SIZE / 1024 / 1024} MB</span>
+              <span>
+                or click to browse · up to {MAX_FILE_SIZE / 1024 / 1024} MB
+              </span>
             </div>
           )}
 
@@ -435,14 +574,27 @@ export function TranslatorApp() {
 
           <div className="card-heading compact">
             <div>
-              <span className="step-label">02 / DIRECTION</span>
-              <h2>Set the destination</h2>
+              <span className="step-label">02 / LANGUAGE PAIR</span>
+              <h2>Set the direction</h2>
             </div>
             <Languages size={22} aria-hidden="true" />
           </div>
 
           <div className="field-grid">
-            <label className="field field-wide">
+            <label className="field">
+              <span>Source language</span>
+              <select
+                value={sourceLanguage}
+                onChange={(event) => setSourceLanguage(event.target.value)}
+              >
+                {LANGUAGES.map(([name, code]) => (
+                  <option key={code} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
               <span>Target language</span>
               <select
                 value={targetLanguage}
@@ -455,75 +607,52 @@ export function TranslatorApp() {
                 ))}
               </select>
             </label>
-            <label className="field">
-              <span>Audience / domain</span>
-              <select
-                value={audience}
-                onChange={(event) => setAudience(event.target.value)}
-              >
-                <option>General</option>
-                <option>Business</option>
-                <option>Legal</option>
-                <option>Medical</option>
-                <option>Academic</option>
-                <option>Technical</option>
-                <option>Marketing</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Tone</span>
-              <select
-                value={tone}
-                onChange={(event) => setTone(event.target.value)}
-              >
-                <option>Match the original</option>
-                <option>Formal and precise</option>
-                <option>Natural and conversational</option>
-                <option>Clear plain language</option>
-              </select>
-            </label>
+          </div>
+
+          <div
+            className={`engine-status engine-${pairStatus}`}
+            aria-live="polite"
+          >
+            {pairStatus === "available" ? (
+              <PackageCheck size={20} aria-hidden="true" />
+            ) : pairStatus === "unsupported" ||
+              pairStatus === "unavailable" ? (
+              <AlertCircle size={20} aria-hidden="true" />
+            ) : (
+              <HardDrive size={20} aria-hidden="true" />
+            )}
+            <div>
+              <strong>{engineCopy.title}</strong>
+              <span>{engineCopy.detail}</span>
+            </div>
+            <span className="network-state">
+              {isOnline ? (
+                <MonitorCheck size={13} aria-hidden="true" />
+              ) : (
+                <WifiOff size={13} aria-hidden="true" />
+              )}
+              {isOnline ? "Online" : "Offline"}
+            </span>
           </div>
 
           <details className="context-panel">
             <summary>
-              <BookOpen size={17} aria-hidden="true" />
-              Add context or preferred terms
+              <ScanText size={17} aria-hidden="true" />
+              Add preferred terminology
               <span>Optional</span>
             </summary>
-            <div className="context-fields">
-              <label className="field">
-                <span>Background context</span>
-                <textarea
-                  value={context}
-                  onChange={(event) => setContext(event.target.value)}
-                  placeholder="Example: This is a Saudi commercial lease for a retail tenant."
-                  rows={3}
-                />
-              </label>
+            <div className="context-fields context-fields-single">
               <label className="field">
                 <span>Glossary</span>
                 <textarea
                   value={glossary}
                   onChange={(event) => setGlossary(event.target.value)}
                   placeholder={"One term per line, for example:\nconsideration → المقابل"}
-                  rows={3}
+                  rows={4}
                 />
               </label>
             </div>
           </details>
-
-          <label className="api-field">
-            <KeyRound size={17} aria-hidden="true" />
-            <span className="sr-only">OpenAI API key</span>
-            <input
-              type="password"
-              autoComplete="off"
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value)}
-              placeholder="OpenAI API key"
-            />
-            <span className="api-note">Never saved</span>
-          </label>
 
           {error && (
             <div className="error-banner" role="alert">
@@ -541,9 +670,7 @@ export function TranslatorApp() {
                     size={18}
                     aria-hidden="true"
                   />
-                  {phase === "reading"
-                    ? "Reading the whole file"
-                    : "Translating with context"}
+                  {progressMessage || "Working on this device"}
                 </span>
                 <button type="button" onClick={cancelTranslation}>
                   Cancel
@@ -553,63 +680,64 @@ export function TranslatorApp() {
                 <span style={{ width: `${progress}%` }} />
               </div>
               <p>
-                {phase === "reading"
-                  ? "Detecting subject, audience, tone, and document structure."
-                  : "Resolving terminology and checking for omissions."}
+                The file stays in this tab. Large PDFs and image OCR can take a
+                little longer.
               </p>
             </div>
           ) : (
             <button className="translate-button" type="submit">
-              Translate with context
+              Translate on this device
               <ArrowRight size={19} aria-hidden="true" />
             </button>
           )}
 
           <p className="consent-note">
-            Your file is sent directly from this tab to OpenAI for processing.
-            Verta does not store your key or upload.
+            Nothing is uploaded. The first use of a language pair downloads a
+            browser-managed pack; that pair can then work without internet.
+            Image OCR is currently limited to English and Arabic source text.
           </p>
         </form>
       </section>
 
       <section className="method-section" aria-labelledby="method-title">
         <div className="section-kicker">
-          <span>THE CONTEXTGUARD METHOD</span>
-          <span>Not a word swapper</span>
+          <span>THE OFFLINE METHOD</span>
+          <span>Private by design</span>
         </div>
         <div className="method-grid">
           <div className="method-intro">
-            <h2 id="method-title">A translation is only right in context.</h2>
+            <h2 id="method-title">What changed to remove the key.</h2>
             <p>
-              Verta treats your file as one connected piece of communication.
-              It understands first, translates second, and checks last.
+              Verta now favors privacy, zero cost, and offline access over the
+              deeper reasoning of a cloud model. The tradeoff is visible—not
+              hidden.
             </p>
           </div>
           <article className="method-card">
             <span>01</span>
             <ScanText size={24} aria-hidden="true" />
-            <h3>Whole-file reading</h3>
+            <h3>Local extraction</h3>
             <p>
-              Infers subject, structure, register, and relationships before
-              choosing a single translated term.
+              Text is read from documents in your browser. English and Arabic
+              images use an OCR model shipped with the app.
             </p>
           </article>
           <article className="method-card">
             <span>02</span>
             <Languages size={24} aria-hidden="true" />
-            <h3>Audience-aware phrasing</h3>
+            <h3>Built-in translation</h3>
             <p>
-              Writes for your chosen reader and domain while preserving the
-              source document&apos;s intent.
+              Supported desktop browsers provide their own language packs. A
+              pair is downloaded once and stays on the device.
             </p>
           </article>
           <article className="method-card">
             <span>03</span>
             <ShieldCheck size={24} aria-hidden="true" />
-            <h3>Semantic quality check</h3>
+            <h3>Basic integrity checks</h3>
             <p>
-              Reviews omissions, numbers, names, terminology, and naturalness
-              before returning the result.
+              Section order, preferred terms, and numeric item counts are
+              checked locally without claiming a cloud-grade semantic review.
             </p>
           </article>
         </div>
@@ -621,7 +749,7 @@ export function TranslatorApp() {
             <div>
               <span className="success-label">
                 <CheckCircle2 size={16} aria-hidden="true" />
-                Translation complete
+                Offline translation complete
               </span>
               <h2 id="result-title">{result.title}</h2>
               <p>
@@ -643,20 +771,30 @@ export function TranslatorApp() {
             >
               {result.sections.map((section, index) => {
                 if (section.kind === "title") {
-                  return <h2 key={`${section.kind}-${index}`}>{section.content}</h2>;
+                  return (
+                    <h2 key={`${section.kind}-${index}`}>
+                      {section.content}
+                    </h2>
+                  );
                 }
                 if (section.kind === "heading") {
-                  return <h3 key={`${section.kind}-${index}`}>{section.content}</h3>;
+                  return (
+                    <h3 key={`${section.kind}-${index}`}>
+                      {section.content}
+                    </h3>
+                  );
                 }
-                return <p key={`${section.kind}-${index}`}>{section.content}</p>;
+                return (
+                  <p key={`${section.kind}-${index}`}>{section.content}</p>
+                );
               })}
             </article>
 
             <aside className="quality-panel">
               <div className="quality-heading">
                 <div>
-                  <span>QUALITY REPORT</span>
-                  <h3>Context check</h3>
+                  <span>OFFLINE CHECKS</span>
+                  <h3>Local report</h3>
                 </div>
                 <span className={`confidence confidence-${result.confidence}`}>
                   {result.confidence}
@@ -667,21 +805,21 @@ export function TranslatorApp() {
               <div className="quality-list">
                 <div>
                   <Check size={15} aria-hidden="true" />
-                  Full-document context used
+                  Section order preserved
                 </div>
                 <div>
                   <Check size={15} aria-hidden="true" />
-                  Names and numbers checked
+                  Numeric item counts compared
                 </div>
                 <div>
                   <Check size={15} aria-hidden="true" />
-                  Terminology consistency checked
+                  Preferred terminology applied
                 </div>
               </div>
 
               {result.terminology.length > 0 && (
                 <div className="report-block">
-                  <h4>Terminology decisions</h4>
+                  <h4>Preferred terminology</h4>
                   {result.terminology.slice(0, 5).map((term, index) => (
                     <div className="term-row" key={`${term.source}-${index}`}>
                       <span>{term.source}</span>
@@ -731,10 +869,10 @@ export function TranslatorApp() {
           </span>
           <strong>VERTA</strong>
         </div>
-        <p>Context-aware AI translation for documents and images.</p>
+        <p>Private on-device translation for documents and images.</p>
         <div>
           <ShieldCheck size={15} aria-hidden="true" />
-          Local-first · Bring your own key
+          Offline-ready · No keys
         </div>
       </footer>
     </main>

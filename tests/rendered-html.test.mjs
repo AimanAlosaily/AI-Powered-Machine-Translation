@@ -25,21 +25,23 @@ async function render() {
   );
 }
 
-test("server-renders the finished Verta product", async () => {
+test("server-renders the keyless offline Verta product", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>Verta — Context-aware AI translation<\/title>/i);
-  assert.match(html, /Translation that reads the room/);
+  assert.match(html, /<title>Verta — Private offline translation<\/title>/i);
+  assert.match(html, /Private translation, built in/);
   assert.match(html, /Meaning in\./);
-  assert.match(html, /Translate with context/);
-  assert.match(html, /OpenAI API key/);
+  assert.match(html, /Nothing out\./);
+  assert.match(html, /Translate on this device/);
+  assert.match(html, /No keys · no uploads/);
+  assert.doesNotMatch(html, /OpenAI API key|api\.openai\.com/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 
-test("removes starter-only assets and metadata", async () => {
+test("includes the offline app shell and removes starter metadata", async () => {
   const [page, layout, packageJson] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -47,9 +49,13 @@ test("removes starter-only assets and metadata", async () => {
   ]);
 
   assert.match(page, /<TranslatorApp \/>/);
-  assert.match(layout, /Verta — Context-aware AI translation/);
+  assert.match(layout, /Verta — Private offline translation/);
   assert.doesNotMatch(layout, /Starter Project|codex-preview|_sites-preview/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
   await access(new URL("public/og.png", projectRoot));
+  await access(new URL("public/manifest.webmanifest", projectRoot));
+  await access(new URL("public/sw.js", projectRoot));
+  await access(new URL("public/icon-192.png", projectRoot));
+  await access(new URL("public/icon-512.png", projectRoot));
 });

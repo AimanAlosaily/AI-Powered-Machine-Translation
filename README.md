@@ -1,17 +1,47 @@
-# Verta
+# Verta Offline
 
-Verta is a local-first, context-aware AI translation workspace for documents
-and images. It reads the complete file before translating so terminology, tone,
-audience, names, numbers, and structure stay consistent.
+Verta is a private, installable translation workspace for documents and
+images. It uses the desktop browser's built-in translation model, so there is
+no API key, account, usage bill, or file upload.
 
-## What it supports
+## How offline mode works
 
-- PDF, Word, PowerPoint, RTF, ODT, plain text, Markdown, and CSV
-- PNG, JPG, JPEG, and WebP images
-- 30+ target languages, including right-to-left Word output
-- Audience/domain controls, tone controls, background context, and a glossary
-- A quality report with terminology decisions and review flags
-- Word (`.docx`) and plain-text downloads
+1. Open Verta in a compatible desktop browser.
+2. Choose a source and target language.
+3. The first translation downloads that browser-managed language pack.
+4. After the pair is ready, the installed app can translate with the internet
+   disconnected.
+
+The application shell is cached by a service worker. PDF and document parsing,
+English/Arabic image OCR, glossary handling, integrity checks, and downloads all
+run locally.
+
+## Supported files
+
+- PDF, DOCX, PPTX, ODT, RTF, plain text, Markdown, and CSV
+- PNG, JPG, JPEG, and WebP images with English or Arabic source text
+- Word (`.docx`) and plain-text output
+
+Legacy binary `.doc` and `.ppt` files are not supported in offline mode.
+
+## Browser requirements
+
+Offline translation requires a desktop browser that implements the
+`Translator` API. Chrome supports it in stable releases from version 138. The
+app detects unsupported browsers and unavailable language pairs before a file
+is processed.
+
+Translation packs and OCR assets need an internet connection the first time
+they are used on a device. Once cached, they remain local and can be reused
+offline.
+
+## Privacy and quality tradeoff
+
+Files and translated text never leave the browser. Removing the cloud model
+also removes its advanced audience, tone, and semantic-review capabilities.
+Verta preserves section order, applies user terminology, and compares numeric
+item counts, but important legal, medical, financial, or safety-critical text
+still needs professional review.
 
 ## Run locally
 
@@ -22,25 +52,10 @@ pnpm install
 pnpm dev
 ```
 
-Open `http://localhost:3000`, add your own OpenAI API key in the app, choose a
-file and target language, then translate.
-
-The key is held only in the current browser tab. Files are sent directly from
-the browser to the OpenAI Responses API and are not stored by Verta. The app
-sets `store: false` on translation requests.
+Open the local URL printed by the development server. The build scripts copy
+the bundled PDF and OCR assets into the static app automatically.
 
 ## GitHub Pages
 
-The included workflow publishes the static app automatically whenever `main`
-is pushed. In the repository settings, set **Pages → Source** to **GitHub
-Actions** if it is not already selected.
-
-## Translation approach
-
-Verta uses GPT-5.6 through the Responses API. Its translation brief requires a
-whole-file context pass before terminology is chosen, complete translation
-without summarization, preservation of meaningful details, and a semantic
-quality check before the result is returned.
-
-Machine translation can still require professional review for legal, medical,
-financial, or safety-critical material.
+The included workflow publishes the static app whenever `main` is pushed.
+GitHub Pages must use **GitHub Actions** as its publishing source.

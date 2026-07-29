@@ -1,32 +1,42 @@
 {
   "name": "verta-context-translation",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
+    "prepare:offline-assets": "node scripts/prepare-offline-assets.mjs",
+    "predev": "pnpm run prepare:offline-assets",
     "dev": "vinext dev",
+    "prebuild": "pnpm run prepare:offline-assets",
     "build": "vinext build",
     "start": "vinext start",
     "test": "pnpm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
+    "prebuild:github": "pnpm run prepare:offline-assets",
     "build:github": "next build"
   },
   "dependencies": {
+    "@tesseract.js-data/ara": "1.0.0",
+    "@tesseract.js-data/eng": "1.0.0",
     "buffer": "6.0.3",
     "docx": "9.5.1",
     "drizzle-orm": "0.45.2",
+    "fflate": "0.8.3",
     "lucide-react": "0.468.0",
     "next": "16.2.6",
+    "pdfjs-dist": "6.2.108",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "tesseract.js": "7.0.0"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
     "@cloudflare/workers-types": "5.20260728.1",
     "@tailwindcss/postcss": "4.2.1",
+    "@types/dom-chromium-ai": "0.0.17",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

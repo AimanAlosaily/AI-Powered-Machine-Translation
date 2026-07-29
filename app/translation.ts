@@ -1,3 +1,5 @@
+import { strFromU8, unzipSync } from "fflate";
+
 export type TranslationSection = {
   kind:
     | "title"
@@ -28,23 +30,26 @@ export type TranslationResult = {
 };
 
 export type TranslationOptions = {
+  sourceLanguage: string;
+  sourceCode: string;
   targetLanguage: string;
-  audience: string;
-  tone: string;
-  context: string;
+  targetCode: string;
   glossary: string;
+};
+
+export type OfflineProgress = {
+  progress: number;
+  message: string;
 };
 
 export const SUPPORTED_EXTENSIONS = [
   "pdf",
-  "doc",
   "docx",
   "rtf",
   "odt",
   "txt",
   "md",
   "csv",
-  "ppt",
   "pptx",
   "png",
   "jpg",
@@ -54,77 +59,29 @@ export const SUPPORTED_EXTENSIONS = [
 
 export const MAX_FILE_SIZE = 20 * 1024 * 1024;
 
-const translationSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    sourceLanguage: { type: "string" },
-    targetLanguage: { type: "string" },
-    documentType: { type: "string" },
-    title: { type: "string" },
-    sections: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          kind: {
-            type: "string",
-            enum: [
-              "title",
-              "heading",
-              "paragraph",
-              "list",
-              "table",
-              "caption",
-              "other",
-            ],
-          },
-          content: { type: "string" },
-        },
-        required: ["kind", "content"],
-      },
-    },
-    qualitySummary: { type: "string" },
-    translationNotes: {
-      type: "array",
-      items: { type: "string" },
-    },
-    terminology: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          source: { type: "string" },
-          chosen: { type: "string" },
-          rationale: { type: "string" },
-        },
-        required: ["source", "chosen", "rationale"],
-      },
-    },
-    reviewFlags: {
-      type: "array",
-      items: { type: "string" },
-    },
-    confidence: {
-      type: "string",
-      enum: ["high", "medium", "low"],
-    },
-  },
-  required: [
-    "sourceLanguage",
-    "targetLanguage",
-    "documentType",
-    "title",
-    "sections",
-    "qualitySummary",
-    "translationNotes",
-    "terminology",
-    "reviewFlags",
-    "confidence",
-  ],
-} as const;
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
+type ExtractedDocument = {
+  documentType: string;
+  sections: TranslationSection[];
+  plainText: string;
+  usedOcr: boolean;
+};
+
+type GlossaryEntry = {
+  source: string;
+  target: string;
+};
+
+function assetUrl(path: string) {
+  return `${BASE_PATH}${path}`;
+}
+
+function abortIfNeeded(signal: AbortSignal) {
+  if (signal.aborted) {
+    throw new DOMException("Translation cancelled.", "AbortError");
+  }
+}
 
 export function getFileExtension(filename: string) {
   return filename.split(".").pop()?.toLowerCase() ?? "";
@@ -139,7 +96,7 @@ export function validateFile(file: File) {
     )
   ) {
     throw new Error(
-      "This file type is not supported yet. Try PDF, Word, PowerPoint, text, CSV, PNG, JPG, or WebP.",
+      "Offline Verta supports PDF, DOCX, PPTX, ODT, RTF, text, CSV, PNG, JPG, and WebP files.",
     );
   }
 
@@ -149,208 +106,561 @@ export function validateFile(file: File) {
 }
 
 export function isImageFile(file: File) {
-  return file.type.startsWith("image/") ||
-    ["png", "jpg", "jpeg", "webp"].includes(getFileExtension(file.name));
-}
-
-export function isPdfFile(file: File) {
   return (
-    file.type === "application/pdf" || getFileExtension(file.name) === "pdf"
+    file.type.startsWith("image/") ||
+    ["png", "jpg", "jpeg", "webp"].includes(getFileExtension(file.name))
   );
 }
 
-export function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("The file could not be read."));
-    reader.readAsDataURL(file);
+function titleFromFilename(filename: string) {
+  return (
+    filename
+      .replace(/\.[^/.]+$/, "")
+      .replace(/[-_]+/g, " ")
+      .trim() || "Translation"
+  );
+}
+
+function cleanText(text: string) {
+  return text
+    .replace(/\u0000/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function inferSections(text: string, filename: string): TranslationSection[] {
+  const blocks = cleanText(text)
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  if (blocks.length === 0) {
+    throw new Error("No readable text was found in this file.");
+  }
+
+  return blocks.map((block, index) => {
+    const withoutMarkdown = block.replace(/^#{1,6}\s+/, "").trim();
+    const looksLikeHeading =
+      /^#{1,6}\s+/.test(block) ||
+      (block.length < 100 &&
+        !/[.!?。！？]\s*$/.test(block) &&
+        !block.includes("\n"));
+    const looksLikeList = /^(?:[-*•]|\d+[.)])\s/m.test(block);
+    const looksLikeTable =
+      getFileExtension(filename) === "csv" ||
+      (block.includes(",") && block.split(",").length >= 3);
+
+    return {
+      kind:
+        index === 0 && looksLikeHeading
+          ? "title"
+          : looksLikeHeading
+            ? "heading"
+            : looksLikeTable
+              ? "table"
+              : looksLikeList
+                ? "list"
+                : "paragraph",
+      content: withoutMarkdown,
+    };
   });
 }
 
-export function buildTranslationPrompt(
-  filename: string,
-  options: TranslationOptions,
+function xmlParagraphs(xml: string) {
+  const document = new DOMParser().parseFromString(xml, "application/xml");
+  if (document.querySelector("parsererror")) {
+    throw new Error("The document structure could not be read.");
+  }
+
+  return Array.from(document.getElementsByTagName("*"))
+    .filter((element) => ["p", "h"].includes(element.localName))
+    .map((element) => cleanText(element.textContent ?? ""))
+    .filter(Boolean);
+}
+
+function unzipFile(bytes: ArrayBuffer) {
+  return unzipSync(new Uint8Array(bytes));
+}
+
+function readZipEntry(
+  archive: ReturnType<typeof unzipSync>,
+  path: string,
 ) {
-  return `Translate the attached file into ${options.targetLanguage}.
-
-Goal
-Produce a complete, publication-ready translation that preserves meaning, intent, tone, and document structure. This is not a literal word-for-word exercise.
-
-Context protocol
-1. Read the entire file before choosing terminology.
-2. Infer the source language, document type, subject, audience, register, and relationships between sections.
-3. Resolve ambiguous expressions using whole-document context.
-4. Keep terminology consistent across every section.
-5. Preserve names, numbers, dates, units, citations, identifiers, and legally or technically meaningful qualifiers.
-6. Translate every meaningful line. Do not summarize, omit, embellish, or add facts.
-7. Recreate headings, paragraphs, lists, tables, and captions in their original reading order.
-8. Write idiomatic ${options.targetLanguage} that sounds authored for the target reader.
-
-Translation brief
-- File: ${filename}
-- Intended audience/domain: ${options.audience}
-- Tone: ${options.tone}
-- Additional context: ${options.context.trim() || "None supplied; infer from the complete file."}
-- Preferred terminology/glossary: ${options.glossary.trim() || "None supplied; choose the most contextually accurate terms."}
-
-Quality check
-Before returning the result, silently compare the translation against the complete source for omissions, changed meaning, inconsistent terminology, and unnatural phrasing. Put only genuine ambiguities or items needing human confirmation in reviewFlags. Keep translationNotes concise and useful.
-
-Return only the requested structured result.`;
+  const entry = archive[path];
+  if (!entry) {
+    throw new Error("The document is missing a required content file.");
+  }
+  return strFromU8(entry);
 }
 
-function extractOutputText(payload: unknown): string {
-  if (!payload || typeof payload !== "object") {
-    throw new Error("OpenAI returned an unreadable response.");
-  }
-
-  const root = payload as {
-    output_text?: unknown;
-    output?: Array<{
-      content?: Array<{ type?: string; text?: string }>;
-    }>;
-  };
-
-  if (typeof root.output_text === "string") {
-    return root.output_text;
-  }
-
-  const text = root.output
-    ?.flatMap((item) => item.content ?? [])
-    .filter((item) => item.type === "output_text" && item.text)
-    .map((item) => item.text)
-    .join("");
-
-  if (!text) {
-    throw new Error("The translation response did not contain any text.");
-  }
-
-  return text;
+async function extractDocx(file: File) {
+  const archive = unzipFile(await file.arrayBuffer());
+  const paragraphs = xmlParagraphs(readZipEntry(archive, "word/document.xml"));
+  return paragraphs.join("\n\n");
 }
 
-function parseStructuredResult(raw: string): TranslationResult {
-  const cleaned = raw
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "");
+async function extractOdt(file: File) {
+  const archive = unzipFile(await file.arrayBuffer());
+  const paragraphs = xmlParagraphs(readZipEntry(archive, "content.xml"));
+  return paragraphs.join("\n\n");
+}
+
+async function extractPptx(file: File) {
+  const archive = unzipFile(await file.arrayBuffer());
+  const slideNames = Object.keys(archive)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    .sort((left, right) => {
+      const leftNumber = Number(left.match(/\d+/)?.[0] ?? 0);
+      const rightNumber = Number(right.match(/\d+/)?.[0] ?? 0);
+      return leftNumber - rightNumber;
+    });
+
+  const slides = slideNames
+    .map((name) => xmlParagraphs(strFromU8(archive[name])).join("\n"))
+    .filter(Boolean);
+
+  return slides.join("\n\n");
+}
+
+function extractRtf(text: string) {
+  return cleanText(
+    text
+      .replace(/\\par[d]?\b/g, "\n\n")
+      .replace(/\\line\b/g, "\n")
+      .replace(/\\tab\b/g, "\t")
+      .replace(/\\'[0-9a-fA-F]{2}/g, (match) =>
+        String.fromCharCode(Number.parseInt(match.slice(2), 16)),
+      )
+      .replace(/\\[a-zA-Z]+-?\d* ?/g, "")
+      .replace(/\\([{}\\])/g, "$1")
+      .replace(/[{}]/g, ""),
+  );
+}
+
+async function extractPdf(
+  file: File,
+  signal: AbortSignal,
+  onProgress: (progress: OfflineProgress) => void,
+) {
+  const pdfjs = await import("pdfjs-dist");
+  pdfjs.GlobalWorkerOptions.workerSrc = assetUrl("/offline/pdf.worker.min.mjs");
+
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(await file.arrayBuffer()),
+  });
+  const document = await loadingTask.promise;
+  const pages: string[] = [];
 
   try {
-    return JSON.parse(cleaned) as TranslationResult;
-  } catch {
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      abortIfNeeded(signal);
+      onProgress({
+        progress: 8 + Math.round((pageNumber / document.numPages) * 20),
+        message: `Reading PDF page ${pageNumber} of ${document.numPages}`,
+      });
+
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const lines: string[] = [];
+      let currentLine = "";
+
+      for (const item of content.items) {
+        if (!("str" in item)) continue;
+        currentLine += `${currentLine ? " " : ""}${item.str}`;
+        if ("hasEOL" in item && item.hasEOL) {
+          lines.push(currentLine.trim());
+          currentLine = "";
+        }
+      }
+      if (currentLine.trim()) lines.push(currentLine.trim());
+      pages.push(lines.filter(Boolean).join("\n"));
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+
+  return pages.join("\n\n");
+}
+
+async function extractImage(
+  file: File,
+  sourceCode: string,
+  signal: AbortSignal,
+  onProgress: (progress: OfflineProgress) => void,
+) {
+  const language =
+    sourceCode === "ar" ? "ara" : sourceCode === "en" ? "eng" : "";
+
+  if (!language) {
     throw new Error(
-      "The translation finished, but its structure could not be read. Please try again.",
+      "Offline image reading currently supports English and Arabic source text. Choose one of those source languages or use a text document.",
     );
+  }
+
+  const { createWorker } = await import("tesseract.js");
+  let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
+  const handleAbort = () => {
+    void worker?.terminate();
+  };
+  signal.addEventListener("abort", handleAbort, { once: true });
+
+  try {
+    worker = await createWorker(language, 1, {
+      workerPath: assetUrl("/offline/worker.min.js"),
+      langPath: assetUrl("/offline"),
+      corePath: assetUrl("/offline/tesseract-core"),
+      logger(message) {
+        if (typeof message.progress === "number") {
+          onProgress({
+            progress: 5 + Math.round(message.progress * 25),
+            message:
+              message.status === "recognizing text"
+                ? "Reading text from the image"
+                : "Preparing offline image reader",
+          });
+        }
+      },
+    });
+    abortIfNeeded(signal);
+    const output = await worker.recognize(file);
+    abortIfNeeded(signal);
+    return cleanText(output.data.text);
+  } finally {
+    signal.removeEventListener("abort", handleAbort);
+    await worker?.terminate();
   }
 }
 
-function errorFromApi(status: number, payload: unknown) {
-  const message =
-    payload &&
-    typeof payload === "object" &&
-    "error" in payload &&
-    payload.error &&
-    typeof payload.error === "object" &&
-    "message" in payload.error &&
-    typeof payload.error.message === "string"
-      ? payload.error.message
-      : "";
+async function extractDocument(
+  file: File,
+  sourceCode: string,
+  signal: AbortSignal,
+  onProgress: (progress: OfflineProgress) => void,
+): Promise<ExtractedDocument> {
+  abortIfNeeded(signal);
+  const extension = getFileExtension(file.name);
+  let text = "";
 
-  if (status === 401) {
-    return new Error("The API key was not accepted. Check it and try again.");
+  onProgress({ progress: 5, message: "Reading the file on this device" });
+
+  if (isImageFile(file)) {
+    text = await extractImage(file, sourceCode, signal, onProgress);
+  } else if (extension === "pdf") {
+    text = await extractPdf(file, signal, onProgress);
+  } else if (extension === "docx") {
+    text = await extractDocx(file);
+  } else if (extension === "pptx") {
+    text = await extractPptx(file);
+  } else if (extension === "odt") {
+    text = await extractOdt(file);
+  } else if (extension === "rtf") {
+    text = extractRtf(await file.text());
+  } else {
+    text = await file.text();
   }
-  if (status === 429) {
-    return new Error(
-      "The API is temporarily rate-limited or the account has reached its usage limit.",
+
+  abortIfNeeded(signal);
+  const sections = inferSections(text, file.name);
+
+  return {
+    documentType: isImageFile(file)
+      ? "Image"
+      : extension === "pdf"
+        ? "PDF"
+        : extension.toUpperCase(),
+    sections,
+    plainText: sections.map((section) => section.content).join("\n\n"),
+    usedOcr: isImageFile(file),
+  };
+}
+
+function parseGlossary(glossary: string): GlossaryEntry[] {
+  return glossary
+    .split(/\r?\n/)
+    .map((line) => line.split(/\s*(?:→|=>|=)\s*/, 2).map((part) => part.trim()))
+    .filter(
+      (parts): parts is [string, string] =>
+        parts.length === 2 && Boolean(parts[0]) && Boolean(parts[1]),
+    )
+    .slice(0, 20)
+    .map(([source, target]) => ({ source, target }));
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceTerm(text: string, automatic: string, preferred: string) {
+  if (!automatic.trim()) return text;
+  return text.replace(
+    new RegExp(escapeRegExp(automatic.trim()), "giu"),
+    preferred,
+  );
+}
+
+function roughChunks(text: string, maximum = 1800) {
+  if (text.length <= maximum) return [text];
+
+  const sentences = text.split(/(?<=[.!?。！？])\s+|\n+/u);
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    if (sentence.length > maximum) {
+      if (current) chunks.push(current);
+      for (let index = 0; index < sentence.length; index += maximum) {
+        chunks.push(sentence.slice(index, index + maximum));
+      }
+      current = "";
+    } else if (!current || current.length + sentence.length + 1 <= maximum) {
+      current = current ? `${current} ${sentence}` : sentence;
+    } else {
+      chunks.push(current);
+      current = sentence;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.filter(Boolean);
+}
+
+async function fitToQuota(translator: Translator, text: string) {
+  const pending = roughChunks(text);
+  const fitted: string[] = [];
+
+  while (pending.length > 0) {
+    const chunk = pending.shift();
+    if (!chunk) continue;
+
+    const usage = await translator.measureInputUsage(chunk);
+    if (usage <= translator.inputQuota * 0.85 || chunk.length < 200) {
+      fitted.push(chunk);
+      continue;
+    }
+
+    const midpoint = Math.floor(chunk.length / 2);
+    const breakAt = Math.max(
+      chunk.lastIndexOf(" ", midpoint),
+      chunk.lastIndexOf("\n", midpoint),
     );
-  }
-  if (status === 413) {
-    return new Error("The file is too large for this request.");
+    const splitAt = breakAt > 50 ? breakAt : midpoint;
+    pending.unshift(chunk.slice(splitAt).trim());
+    pending.unshift(chunk.slice(0, splitAt).trim());
   }
 
-  return new Error(message || `Translation failed with status ${status}.`);
+  return fitted;
+}
+
+function extractNumbers(text: string) {
+  return text.match(/\p{N}+(?:[.,]\p{N}+)*/gu) ?? [];
+}
+
+function languageApiError(error: unknown) {
+  if (error instanceof DOMException) {
+    if (error.name === "NotAllowedError") {
+      return new Error(
+        "The browser blocked its translation model. Open Verta directly in a desktop Chrome tab and try again.",
+      );
+    }
+    if (error.name === "QuotaExceededError") {
+      return new Error(
+        "This section is too large for the browser model. Try a smaller file.",
+      );
+    }
+  }
+
+  if (error instanceof Error && error.message) return error;
+  return new Error("The offline translation model could not finish this file.");
+}
+
+export async function getPairAvailability(
+  sourceCode: string,
+  targetCode: string,
+) {
+  if (sourceCode === targetCode) return "available" as Availability;
+  if (typeof Translator === "undefined") return "unsupported" as const;
+
+  try {
+    return await Translator.availability({
+      sourceLanguage: sourceCode,
+      targetLanguage: targetCode,
+    });
+  } catch {
+    return "unavailable" as Availability;
+  }
 }
 
 export async function translateFile({
   file,
-  apiKey,
   options,
-  safetyIdentifier,
   signal,
+  onProgress,
 }: {
   file: File;
-  apiKey: string;
   options: TranslationOptions;
-  safetyIdentifier: string;
   signal: AbortSignal;
+  onProgress: (progress: OfflineProgress) => void;
 }) {
-  const fileData = await fileToDataUrl(file);
-  const prompt = buildTranslationPrompt(file.name, options);
-  const attachment = isImageFile(file)
-    ? {
-        type: "input_image",
-        image_url: fileData,
-        detail: "original",
-      }
-    : {
-        type: "input_file",
-        filename: file.name,
-        file_data: fileData,
-        ...(isPdfFile(file) ? { detail: "high" } : {}),
-      };
+  validateFile(file);
+  abortIfNeeded(signal);
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    signal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey.trim()}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-5.6",
-      store: false,
-      safety_identifier: safetyIdentifier,
-      reasoning: {
-        effort: "medium",
-        context: "current_turn",
-      },
-      max_output_tokens: 24000,
-      text: {
-        verbosity: "low",
-        format: {
-          type: "json_schema",
-          name: "context_aware_translation",
-          strict: true,
-          schema: translationSchema,
-        },
-      },
-      input: [
-        {
-          role: "user",
-          content: [{ type: "input_text", text: prompt }, attachment],
-        },
-      ],
-    }),
-  });
-
-  const payload = (await response.json()) as unknown;
-  if (!response.ok) {
-    throw errorFromApi(response.status, payload);
+  if (typeof Translator === "undefined") {
+    throw new Error(
+      "Offline translation needs desktop Chrome 138 or newer. This browser does not provide an on-device translation model.",
+    );
   }
 
-  return parseStructuredResult(extractOutputText(payload));
+  let translator: Translator | undefined;
+
+  try {
+    if (options.sourceCode !== options.targetCode) {
+      const availability = await Translator.availability({
+        sourceLanguage: options.sourceCode,
+        targetLanguage: options.targetCode,
+      });
+
+      if (availability === "unavailable") {
+        throw new Error(
+          "This language pair is not available in the browser's offline model.",
+        );
+      }
+      if (availability === "downloadable" && !navigator.onLine) {
+        throw new Error(
+          "This language pack has not been downloaded yet. Connect once, run this translation, and the pair will work offline afterward.",
+        );
+      }
+
+      translator = await Translator.create({
+        sourceLanguage: options.sourceCode,
+        targetLanguage: options.targetCode,
+        signal,
+        monitor(monitor) {
+          monitor.addEventListener("downloadprogress", (event) => {
+            onProgress({
+              progress: 30 + Math.round(event.loaded * 20),
+              message: "Downloading this language pack once",
+            });
+          });
+        },
+      });
+    }
+
+    const extracted = await extractDocument(
+      file,
+      options.sourceCode,
+      signal,
+      onProgress,
+    );
+    const glossary = parseGlossary(options.glossary);
+    const terminology: TranslationResult["terminology"] = [];
+    const automaticTerms = new Map<string, string>();
+
+    if (translator) {
+      for (const entry of glossary) {
+        abortIfNeeded(signal);
+        automaticTerms.set(
+          entry.source,
+          await translator.translate(entry.source, { signal }),
+        );
+        terminology.push({
+          source: entry.source,
+          chosen: entry.target,
+          rationale: "Preferred term supplied by the user.",
+        });
+      }
+    } else {
+      for (const entry of glossary) {
+        terminology.push({
+          source: entry.source,
+          chosen: entry.target,
+          rationale: "Preferred term supplied by the user.",
+        });
+      }
+    }
+
+    const translatedSections: TranslationSection[] = [];
+
+    for (let index = 0; index < extracted.sections.length; index += 1) {
+      abortIfNeeded(signal);
+      const section = extracted.sections[index];
+      onProgress({
+        progress:
+          45 +
+          Math.round(((index + 1) / extracted.sections.length) * 48),
+        message: `Translating section ${index + 1} of ${extracted.sections.length}`,
+      });
+
+      let content = section.content;
+      if (translator) {
+        const chunks = await fitToQuota(translator, content);
+        const translatedChunks: string[] = [];
+        for (const chunk of chunks) {
+          abortIfNeeded(signal);
+          translatedChunks.push(
+            await translator.translate(chunk, { signal }),
+          );
+        }
+        content = translatedChunks.join(" ");
+      }
+
+      for (const entry of glossary) {
+        const automatic =
+          automaticTerms.get(entry.source) ??
+          (options.sourceCode === options.targetCode ? entry.source : "");
+        content = replaceTerm(content, automatic, entry.target);
+      }
+
+      translatedSections.push({ ...section, content });
+    }
+
+    const translatedText = translatedSections
+      .map((section) => section.content)
+      .join("\n\n");
+    const sourceNumbers = extractNumbers(extracted.plainText);
+    const translatedNumbers = extractNumbers(translatedText);
+    const reviewFlags: string[] = [];
+
+    if (sourceNumbers.length !== translatedNumbers.length) {
+      reviewFlags.push(
+        `The source has ${sourceNumbers.length} numeric items and the result has ${translatedNumbers.length}; compare dates, amounts, and identifiers.`,
+      );
+    }
+    if (extracted.usedOcr) {
+      reviewFlags.push(
+        "Image text was read with local OCR. Check names, small print, and low-contrast areas.",
+      );
+    }
+    reviewFlags.push(
+      "This keyless mode does not perform a cloud semantic review; important legal, medical, or financial text needs human review.",
+    );
+
+    onProgress({ progress: 100, message: "Offline translation complete" });
+
+    return {
+      sourceLanguage: options.sourceLanguage,
+      targetLanguage: options.targetLanguage,
+      documentType: extracted.documentType,
+      title:
+        translatedSections.find((section) => section.kind === "title")
+          ?.content ?? titleFromFilename(file.name),
+      sections: translatedSections,
+      qualitySummary:
+        "Translated on this device with the browser's language pack. Section order and preferred terminology were preserved, and numeric item counts were compared.",
+      translationNotes: [
+        "No file, key, or translation text was sent to Verta or a cloud API.",
+        "Offline mode favors privacy and cost over advanced context rewriting.",
+      ],
+      terminology,
+      reviewFlags,
+      confidence: reviewFlags.length > 1 ? "low" : "medium",
+    } satisfies TranslationResult;
+  } catch (error) {
+    throw languageApiError(error);
+  } finally {
+    translator?.destroy();
+  }
 }
 
 export function getFullTranslation(result: TranslationResult) {
   return result.sections.map((section) => section.content).join("\n\n");
-}
-
-export function getSafetyIdentifier() {
-  const storageKey = "verta-safety-id";
-  const existing = window.localStorage.getItem(storageKey);
-  if (existing) return existing;
-
-  const value = `verta_${window.crypto.randomUUID()}`;
-  window.localStorage.setItem(storageKey, value);
-  return value;
 }

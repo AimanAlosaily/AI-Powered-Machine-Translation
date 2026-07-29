@@ -9,7 +9,7 @@
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",
-    "types": ["@cloudflare/workers-types"],
+    "types": ["@cloudflare/workers-types", "@types/dom-chromium-ai"],
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
