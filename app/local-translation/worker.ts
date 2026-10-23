@@ -54,14 +54,18 @@ async function translate(text: string, id: number) {
   const countTokens = (value: string) => encode(value).inputs.input_ids.size;
   const generate = async (chunk: string) => {
     const { inputs, extra } = encode(chunk);
-    const tokens = await current.model.generate({
+    // generate() forwards generation settings as untyped kwargs.
+    const options = {
       ...inputs,
       ...extra,
       max_new_tokens: MAX_NEW_TOKENS,
       num_beams: 1,
       do_sample: false,
       return_dict_in_generate: false,
-    }) as Tensor;
+    };
+    const tokens = await current.model.generate(
+      options as unknown as Parameters<PreTrainedModel["generate"]>[0],
+    ) as Tensor;
     try {
       assertCompleteGeneration(tokens.dims[1]);
       const result = current.tokenizer.batch_decode(tokens, { skip_special_tokens: true })[0]?.trim();
