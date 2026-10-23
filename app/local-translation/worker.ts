@@ -130,10 +130,12 @@ scope.onmessage = async ({ data }) => {
         dtype: "q8",
         device: "wasm",
         progress_callback,
-        // NLLB's weights are about 8x OPUS-MT's. Skip the runtime's pre-packed
-        // weight copies and its growing memory arena to lower peak RAM.
+        // NLLB's weights are about 8x OPUS-MT's. Graph optimization can fold
+        // its 8-bit embedding tables back into float32 copies, so it is off,
+        // along with pre-packed weight copies and the growing memory arena.
         ...(model.family === "nllb" ? {
           session_options: {
+            graphOptimizationLevel: "disabled",
             enableCpuMemArena: false,
             enableMemPattern: false,
             extra: { session: { disable_prepacking: "1" } },
