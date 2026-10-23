@@ -38,7 +38,11 @@ const errors = [];
 page.on('pageerror', (error) => errors.push(error.message));
 const url = `http://127.0.0.1:${server.address().port}${prefix}/`;
 const samples = [];
-let sampledRssMiB = 0;
+// Memory: proportional set size (PSS) from /proc, so pages shared between
+// Chromium processes are split rather than counted once per process. Peaks are
+// tracked per translation and per process type (browser, renderer, utility…).
+let overallPeakMiB = 0;
+let peak = { totalMiB: 0, byType: {} };
 let sampling = false;
 const cdp = await context.browser().newBrowserCDPSession();
 const memoryTimer = setInterval(async () => {
@@ -47,18 +51,23 @@ const memoryTimer = setInterval(async () => {
   try {
     const { processInfo } = await cdp.send('SystemInfo.getProcessInfo');
     let totalKiB = 0;
-    for (const { id } of processInfo) {
+    const byType = {};
+    for (const { id, type } of processInfo) {
       try {
-        const cmdline = await readFile(`/proc/${id}/cmdline`, 'utf8');
-        if (!/chrome|chromium/i.test(cmdline)) continue;
-        const status = await readFile(`/proc/${id}/status`, 'utf8');
-        totalKiB += Number(status.match(/VmRSS:\s+(\d+)/)?.[1] ?? 0);
+        const rollup = await readFile(`/proc/${id}/smaps_rollup`, 'utf8');
+        const kib = Number(rollup.match(/^Pss:\s+(\d+)/m)?.[1] ?? 0);
+        totalKiB += kib;
+        byType[type] = (byType[type] ?? 0) + kib;
       } catch { /* The process may have exited between samples. */ }
     }
-    sampledRssMiB = Math.max(sampledRssMiB, totalKiB / 1024);
-  } catch { /* RSS sampling is Linux-only and nonessential to the test. */ }
+    const totalMiB = totalKiB / 1024;
+    overallPeakMiB = Math.max(overallPeakMiB, totalMiB);
+    if (totalMiB > peak.totalMiB) {
+      peak = { totalMiB, byType: Object.fromEntries(Object.entries(byType).map(([key, value]) => [key, Math.round(value / 1024)])) };
+    }
+  } catch { /* PSS sampling is Linux-only and nonessential to the test. */ }
   finally { sampling = false; }
-}, 500);
+}, 250);
 
 const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
 
@@ -78,13 +87,14 @@ async function translate(name, source, target, text, expectedScript) {
   await page.locator('.field-grid select').nth(1).selectOption(target);
   await page.locator('input[type=file]').setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.from(text) });
   const started = Date.now();
+  peak = { totalMiB: 0, byType: {} };
   await page.getByRole('button', { name: 'Translate on this device', exact: true }).click();
   await page.locator('.result-section, .error-banner').waitFor({ timeout: 300000 });
   if (await page.locator('.error-banner').count()) throw new Error(await page.locator('.error-banner').innerText());
   const output = await page.locator('.document-preview').innerText();
   assert.match(output, expectedScript);
   assert.ok(output.trim().length > 0);
-  samples.push({ name, source, target, input: text, output, elapsedMs: Date.now() - started });
+  samples.push({ name, source, target, input: text, output, elapsedMs: Date.now() - started, peakPssMiB: Math.round(peak.totalMiB), peakPssByTypeMiB: peak.byType });
   console.log(JSON.stringify(samples.at(-1)));
 }
 
@@ -127,7 +137,7 @@ try {
   assert.deepEqual(errors, []);
   await mkdir('work', { recursive: true });
   await page.screenshot({ path: 'work/compact-model-browser.png', fullPage: true });
-  console.log(JSON.stringify({ passed: true, samples: samples.length, browser: context.browser().version(), sampledBrowserRssMiB: sampledRssMiB, note: 'Sum of Linux process RSS, sampled every 500ms; shared pages may be counted twice. Not a 6 GB device benchmark or quality benchmark.' }));
+  console.log(JSON.stringify({ passed: true, samples: samples.length, browser: context.browser().version(), peakBrowserPssMiB: Math.round(overallPeakMiB), note: 'Sum of Linux PSS over all Chromium processes, sampled every 250 ms; short spikes between samples can be missed. Not a 6 GB device benchmark or quality benchmark.' }));
 } finally {
   clearInterval(memoryTimer);
   await context.close();
