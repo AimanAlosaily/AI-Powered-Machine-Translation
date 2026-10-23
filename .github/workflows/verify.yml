@@ -40,7 +40,7 @@ jobs:
       - run: pnpm run typecheck
 
   browser:
-    name: Real compact model in Chromium (online, offline, long text, cancel)
+    name: Real models in Chromium (online, offline, long text, Word, cancel)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
