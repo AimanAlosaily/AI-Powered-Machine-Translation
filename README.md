@@ -46,18 +46,19 @@ constrained decoding or document-wide reasoning.
 
 1. Open Verta in a current browser with WebAssembly and Web Workers, over HTTPS
    or localhost. No browser translation feature or extension is needed.
-2. Choose English → Arabic or Arabic → English, upload a file, and translate.
-3. The first use downloads that direction's model from Hugging Face. Only model
-   assets are fetched; source and translated text stay on the device.
-4. After a successful translation, that direction's model is cached. Keep site
-   data and revisit the same app URL to reuse the model offline. Translate once
-   in each direction while online if you need both offline.
-5. Use each required file type online once too, so the app can cache its parser,
-   export, and OCR assets. A cached translation model alone does not prepare an
-   unused file parser or OCR language.
+   Optionally install it as an app from the browser menu.
+2. On the first visit the service worker saves every file of the app,
+   including the PDF reader, image OCR (English and Arabic) and Word exporter,
+   so all features work offline later, not only the ones already used.
+3. While online, press **Save both · 222 MB** to download both translation
+   models from Hugging Face. (Translating in a direction also downloads that
+   direction's model.) Only model files are fetched; your documents and
+   translations never leave the device.
+4. When the panel says both directions are saved, Verta translates Arabic ↔
+   English with no internet. Keep site data so the browser keeps the files.
 
 Browser storage eviction, private browsing, or clearing site data can remove
-cached assets. The status checks actual model cache entries and does not rely
+saved files. The status checks the actual cached model files and does not rely
 on a permanent “downloaded” flag. If a download was interrupted, connect and
 retry.
 
@@ -98,7 +99,8 @@ NEXT_PUBLIC_STATIC_EXPORT=true pnpm run build:github
 The `Verify Verta` GitHub Actions workflow runs these on every push, plus
 `pnpm run test:browser`: the real pinned models in Chromium with the browser's
 own `Translator` API removed. It covers both directions online, an offline
-reload, long numbered input that fails if any sentence is missing, a `.docx`
+reload, the **Save both** button followed by a first-ever Arabic → English job
+offline, long numbered input that fails if any sentence is missing, a `.docx`
 upload and Word export while offline, and cancel-then-restart.
 
 The unit suite covers sentence and token-budget splitting without source loss, output-limit

@@ -108,12 +108,17 @@ try {
   await page.goto(url);
   await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
   await translate('meeting.txt', 'English', 'Arabic', 'The meeting is tomorrow at ten in the morning.', /[\u0600-\u06ff]/u);
-  await translate('arabic.txt', 'Arabic', 'English', 'هذا البرنامج يترجم المستندات على جهازك دون إرسالها إلى الإنترنت.', /[A-Za-z]/u);
   // Translator was removed from the page above; Verta must not need it.
   assert.equal(await page.evaluate(() => typeof globalThis.Translator), 'undefined');
+  // "Save both" must fetch Arabic → English without translating in that
+  // direction, so the first Arabic → English job below runs offline.
+  await page.getByRole('button', { name: /Save both/ }).click();
+  await page.getByText('Both directions are saved', { exact: false }).waitFor({ timeout: 300000 });
   // A fresh worker and a reloaded page must both work without network access.
   await context.setOffline(true);
   await page.reload();
+  await page.getByText('Both directions are saved', { exact: false }).waitFor({ timeout: 30000 });
+  await translate('arabic.txt', 'Arabic', 'English', 'هذا البرنامج يترجم المستندات على جهازك دون إرسالها إلى الإنترنت.', /[A-Za-z]/u);
   await translate('offline-en.txt', 'English', 'Arabic', 'Thank you for your help.', /[\u0600-\u06ff]/u);
   await translate('offline-ar.txt', 'Arabic', 'English', 'شكرا على مساعدتك.', /[A-Za-z]/u);
   // Numbered sentences prove completeness: an omitted sentence loses its number.

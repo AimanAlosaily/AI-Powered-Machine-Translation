@@ -37,9 +37,12 @@ import {
   getFileExtension,
   getFullTranslation,
   getPairAvailability,
+  isOfflineReady,
   MAX_FILE_SIZE,
+  OFFLINE_PACK_MB,
   type PairStatus,
   planSizeMB,
+  saveForOffline,
   translateFile,
   TranslationResult,
   translationPlan,
@@ -146,6 +149,11 @@ export function TranslatorApp() {
   const isInstalled = useSyncExternalStore(subscribeInstalled, () => window.matchMedia("(display-mode: standalone)").matches, () => false);
   const inputRef = useRef<HTMLInputElement>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  // "Save both directions" downloads both models ahead of time for offline use.
+  const [offlineReady, setOfflineReady] = useState<boolean | null>(null);
+  const [savingMessage, setSavingMessage] = useState("");
+  const [savedCount, setSavedCount] = useState(0);
+  const savingRef = useRef<AbortController | null>(null);
 
   const sourceCode =
     LANGUAGES.find(([name]) => name === sourceLanguage)?.[1] ?? "en";
@@ -197,6 +205,41 @@ export function TranslatorApp() {
     };
   }, [sourceCode, targetCode, isOnline, phase]);
 
+  useEffect(() => {
+    let active = true;
+    void isOfflineReady().then((ready) => {
+      if (active) setOfflineReady(ready);
+    });
+    return () => {
+      active = false;
+    };
+  }, [phase, savedCount]);
+
+  const saveOffline = async () => {
+    if (savingRef.current || controllerRef.current) return;
+    const controller = new AbortController();
+    savingRef.current = controller;
+    setError("");
+    setSavingMessage("Preparing offline download");
+    try {
+      await saveForOffline(controller.signal, (message) => {
+        if (savingRef.current === controller) setSavingMessage(message);
+      });
+    } catch (saveError) {
+      if (!(saveError instanceof DOMException && saveError.name === "AbortError")) {
+        setError(saveError instanceof Error ? saveError.message : "The models could not be saved for offline use.");
+      }
+    } finally {
+      if (savingRef.current === controller) savingRef.current = null;
+      setSavingMessage("");
+      setSavedCount((count) => count + 1);
+    }
+  };
+
+  const cancelSaving = () => {
+    savingRef.current?.abort();
+  };
+
   const chooseFile = (nextFile?: File) => {
     if (!nextFile) return;
     try {
@@ -229,7 +272,7 @@ export function TranslatorApp() {
 
   const handleTranslate = async (event: FormEvent) => {
     event.preventDefault();
-    if (controllerRef.current) return;
+    if (controllerRef.current || savingRef.current) return;
     if (!file) {
       setError("Choose a document or image first.");
       setPhase("error");
@@ -333,57 +376,62 @@ export function TranslatorApp() {
 
   const downloadDocx = async () => {
     if (!file || !result) return;
+    try {
+      const {
+        AlignmentType,
+        Document,
+        HeadingLevel,
+        Packer,
+        Paragraph,
+        TextRun,
+      } = await import("docx");
 
-    const {
-      AlignmentType,
-      Document,
-      HeadingLevel,
-      Packer,
-      Paragraph,
-      TextRun,
-    } = await import("docx");
-
-    const children = [
-      new Paragraph({
-        heading: HeadingLevel.TITLE,
-        alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-        bidirectional: isRtl,
-        children: [new TextRun({ text: result.title, bold: true })],
-      }),
-      ...result.sections.map((section) => {
-        const heading =
-          section.kind === "title"
-            ? HeadingLevel.HEADING_1
-            : section.kind === "heading"
-              ? HeadingLevel.HEADING_2
-              : undefined;
-        return new Paragraph({
-          heading,
+      const children = [
+        new Paragraph({
+          heading: HeadingLevel.TITLE,
           alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
           bidirectional: isRtl,
-          spacing: { after: 180 },
-          children: [
-            new TextRun({
-              text: section.content,
-              bold: section.kind === "title" || section.kind === "heading",
-            }),
-          ],
-        });
-      }),
-    ];
+          children: [new TextRun({ text: result.title, bold: true })],
+        }),
+        ...result.sections.map((section) => {
+          const heading =
+            section.kind === "title"
+              ? HeadingLevel.HEADING_1
+              : section.kind === "heading"
+                ? HeadingLevel.HEADING_2
+                : undefined;
+          return new Paragraph({
+            heading,
+            alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
+            bidirectional: isRtl,
+            spacing: { after: 180 },
+            children: [
+              new TextRun({
+                text: section.content,
+                bold: section.kind === "title" || section.kind === "heading",
+              }),
+            ],
+          });
+        }),
+      ];
 
-    const document = new Document({
-      sections: [{ properties: {}, children }],
-      creator: "Verta Offline",
-      title: result.title,
-      description: `Translated offline into ${result.targetLanguage} with Verta`,
-    });
+      const document = new Document({
+        sections: [{ properties: {}, children }],
+        creator: "Verta Offline",
+        title: result.title,
+        description: `Translated offline into ${result.targetLanguage} with Verta`,
+      });
 
-    const blob = await Packer.toBlob(document);
-    downloadBlob(
-      blob,
-      `${safeFilename(file.name)}-${targetCode}-translated.docx`,
-    );
+      const blob = await Packer.toBlob(document);
+      downloadBlob(
+        blob,
+        `${safeFilename(file.name)}-${targetCode}-translated.docx`,
+      );
+    } catch {
+      // The Word exporter is loaded on demand; it can fail if this browser
+      // has not saved the app's files for offline use yet.
+      setError("The Word file could not be created. Connect to the internet once so Verta can finish saving its offline files, then try again, or download plain text.");
+    }
   };
 
   return (
@@ -599,6 +647,42 @@ export function TranslatorApp() {
             </span>
           </div>
 
+          {offlineReady !== null && (
+            <div
+              className={`offline-pack${offlineReady ? " offline-pack-ready" : ""}`}
+              aria-live="polite"
+            >
+              {offlineReady ? (
+                <>
+                  <CheckCircle2 size={16} aria-hidden="true" />
+                  <span>Both directions are saved. Verta can translate with no internet.</span>
+                </>
+              ) : savingMessage ? (
+                <>
+                  <LoaderCircle className="spinner" size={16} aria-hidden="true" />
+                  <span>{savingMessage}</span>
+                  <button type="button" className="offline-pack-cancel" onClick={cancelSaving}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <DownloadCloud size={16} aria-hidden="true" />
+                  <span>
+                    {isOnline
+                      ? "Save English → Arabic and Arabic → English now to use Verta with no internet later."
+                      : "Connect once to save both directions for offline use."}
+                  </span>
+                  {isOnline && (
+                    <button type="button" onClick={saveOffline} disabled={isWorking}>
+                      Save both · {OFFLINE_PACK_MB} MB
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           <details className="context-panel">
             <summary>
               <ScanText size={17} aria-hidden="true" />
@@ -650,7 +734,11 @@ export function TranslatorApp() {
               </p>
             </div>
           ) : (
-            <button className="translate-button" type="submit">
+            <button
+              className="translate-button"
+              type="submit"
+              disabled={Boolean(savingMessage)}
+            >
               Translate on this device
               <ArrowRight size={19} aria-hidden="true" />
             </button>

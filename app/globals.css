@@ -592,6 +592,52 @@ button {
   background: #f7edd7;
 }
 
+.offline-pack {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.offline-pack > svg {
+  color: var(--sage-deep);
+}
+
+.offline-pack button {
+  padding: 8px 11px;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.offline-pack button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.offline-pack .offline-pack-cancel {
+  border-color: transparent;
+  background: none;
+  color: var(--danger);
+  text-transform: uppercase;
+}
+
+.offline-pack-ready {
+  border-style: solid;
+  background: #eef2e9;
+  color: var(--ink);
+}
+
 .network-state {
   display: inline-flex;
   align-items: center;
@@ -669,6 +715,11 @@ button {
     transform 150ms ease,
     box-shadow 150ms ease,
     background 150ms ease;
+}
+
+.translate-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .translate-button:hover {
@@ -1223,6 +1274,15 @@ footer > div:last-child {
 
   .network-state {
     grid-column: 2;
+  }
+
+  .offline-pack {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .offline-pack button {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .field-wide {

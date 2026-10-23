@@ -16,7 +16,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "prebuild:github": "pnpm run prepare:offline-assets",
-    "build:github": "next build",
+    "build:github": "next build && node scripts/write-offline-manifest.mjs",
     "test:unit": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "test:browser": "node tests/compact-model.browser.mjs"

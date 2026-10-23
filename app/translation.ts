@@ -1,6 +1,6 @@
 import { strFromU8, unzipSync } from "fflate";
 import { createCompactTranslator, supportsCompactTranslation } from "./local-translation/client";
-import { isPlanCached, translationPlan } from "./local-translation/models";
+import { isPlanCached, planSizeMB, translationPlan } from "./local-translation/models";
 
 export { planSizeMB, translationPlan } from "./local-translation/models";
 
@@ -426,6 +426,49 @@ export async function getPairAvailability(
 }
 
 const LANGUAGE_NAMES: Record<string, string> = { ar: "Arabic", en: "English" };
+
+const DIRECTIONS = [["en", "ar"], ["ar", "en"]] as const;
+
+/** Download size of both directions' models, in MB. */
+export const OFFLINE_PACK_MB = DIRECTIONS.reduce(
+  (sum, [source, target]) => sum + planSizeMB(translationPlan(source, target)!),
+  0,
+);
+
+/** True when both directions' model files are in this browser's cache. */
+export async function isOfflineReady() {
+  const cached = await Promise.all(
+    DIRECTIONS.map(([source, target]) => isPlanCached(translationPlan(source, target)!)),
+  );
+  return cached.every(Boolean);
+}
+
+/**
+ * Downloads and caches both directions' models so the installed app can
+ * translate either way with no internet. Each model is loaded once in a worker
+ * (which saves its files to the cache) and released before the next one.
+ */
+export async function saveForOffline(
+  signal: AbortSignal,
+  onMessage: (message: string) => void,
+) {
+  if (!supportsCompactTranslation()) {
+    throw new Error("This browser needs WebAssembly and Web Workers for local translation.");
+  }
+  for (const [source, target] of DIRECTIONS) {
+    const plan = translationPlan(source, target)!;
+    if (await isPlanCached(plan)) continue;
+    for (const stage of plan) {
+      abortIfNeeded(signal);
+      const label = `${LANGUAGE_NAMES[stage.source]} → ${LANGUAGE_NAMES[stage.target]}`;
+      onMessage(`Saving the ${label} model`);
+      const translator = await createCompactTranslator(stage, signal, (message) => {
+        onMessage(`${label}: ${message}`);
+      });
+      translator.destroy();
+    }
+  }
+}
 
 export async function translateFile({
   file,

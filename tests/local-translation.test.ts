@@ -4,7 +4,7 @@ import { splitToTokenBudget, splitSentences, assertCompleteGeneration, MAX_NEW_T
 import { isModelCached, modelFileUrls, planSizeMB, translationPlan } from "../app/local-translation/models";
 import { LANGUAGES } from "../app/languages";
 import { createCompactTranslator } from "../app/local-translation/client";
-import { getPairAvailability, translateFile } from "../app/translation";
+import { getPairAvailability, isOfflineReady, OFFLINE_PACK_MB, saveForOffline, translateFile } from "../app/translation";
 
 test("token splitting retains all English, Arabic, whitespace, and Unicode input", () => {
   const samples = [
@@ -163,6 +163,25 @@ test("Arabic ↔ English translates with the local model and no browser Translat
   const worker = FakeWorker.instances.at(-1)!;
   assert.equal(worker.terminated, true);
   assert.equal((worker.messages[0] as { stage: { model: { id: string } } }).stage.model.id, "Xenova/opus-mt-en-ar");
+});
+
+test("saving for offline loads each direction's model once, one at a time", async () => {
+  setGlobal("Worker", FakeWorker);
+  setGlobal("caches", undefined);
+  assert.equal(await isOfflineReady(), false);
+  assert.equal(OFFLINE_PACK_MB, 222);
+  const before = FakeWorker.instances.length;
+  const messages: string[] = [];
+  await saveForOffline(new AbortController().signal, (message) => messages.push(message));
+  const workers = FakeWorker.instances.slice(before);
+  assert.equal(workers.length, 2);
+  assert.ok(workers.every((worker) => worker.terminated));
+  assert.deepEqual(
+    workers.map((worker) => (worker.messages[0] as { stage: { model: { id: string } } }).stage.model.id),
+    ["Xenova/opus-mt-en-ar", "Xenova/opus-mt-ar-en"],
+  );
+  assert.ok(workers.every((worker) => worker.messages.length === 1), "saving must not translate anything");
+  assert.match(messages[0], /English → Arabic/);
 });
 
 test("same-language extraction never requires or creates an AI model", async () => {
