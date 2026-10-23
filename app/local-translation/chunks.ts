@@ -1,6 +1,30 @@
 export const MAX_INPUT_TOKENS = 192;
 export const MAX_NEW_TOKENS = 384;
 
+type SentenceSegmenter = { segment(input: string): Iterable<{ segment: string }> };
+
+// Sentence end, optional closing quote/bracket, then whitespace. The whitespace
+// stays with the preceding sentence so joining the pieces restores the input.
+const SENTENCE_BOUNDARY = /(?<=[.!?؟。！？…]+["'”’»)\]]*\s+)(?!\s)/u;
+
+function defaultSegmenter(): SentenceSegmenter | null {
+  return typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "sentence" })
+    : null;
+}
+
+// OPUS-MT is trained on sentence pairs. Given several sentences at once it can
+// silently omit some of them, so the worker translates one sentence per call.
+export function splitSentences(
+  text: string,
+  segmenter: SentenceSegmenter | null = defaultSegmenter(),
+): string[] {
+  const pieces = segmenter
+    ? Array.from(segmenter.segment(text), (part) => part.segment)
+    : text.split(SENTENCE_BOUNDARY);
+  return pieces.filter((piece) => piece.length > 0);
+}
+
 // Split the original string, never a decoded/truncated token sequence. Joining
 // the chunks exactly reconstructs the input, including Arabic and surrogate pairs.
 export function splitToTokenBudget(

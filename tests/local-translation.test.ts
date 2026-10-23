@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { splitToTokenBudget, assertCompleteGeneration, MAX_NEW_TOKENS } from "../app/local-translation/chunks";
+import { splitToTokenBudget, splitSentences, assertCompleteGeneration, MAX_NEW_TOKENS } from "../app/local-translation/chunks";
 import { compactPair, isModelCached, modelFileUrls } from "../app/local-translation/models";
 import { createCompactTranslator } from "../app/local-translation/client";
 import { getPairAvailability, translateFile } from "../app/translation";
@@ -18,6 +18,24 @@ test("token splitting retains all English, Arabic, whitespace, and Unicode input
     const chunks = splitToTokenBudget(sample, count, 192);
     assert.equal(chunks.join(""), sample);
     assert.ok(chunks.every((chunk) => count(chunk) <= 192));
+  }
+});
+
+test("sentence splitting keeps every character and separates English and Arabic sentences", () => {
+  const english = Array.from({ length: 40 }, (_, i) => `Invoice ${i + 1} was paid.`).join(" ");
+  const arabic = "مرحبا بالعالم. هل وصلت الفاتورة؟ نعم! شكرا.";
+  const mixed = `He said "Stop." Then he left.   Done`;
+  // Both the Intl.Segmenter path and the regex fallback must be lossless.
+  for (const segmenter of [undefined, null] as const) {
+    const pieces = (text: string) => splitSentences(text, segmenter);
+    assert.equal(pieces(english).join(""), english);
+    assert.equal(pieces(english).length, 40);
+    assert.equal(pieces(arabic).join(""), arabic);
+    assert.deepEqual(pieces(arabic).map((piece) => piece.trim()), ["مرحبا بالعالم.", "هل وصلت الفاتورة؟", "نعم!", "شكرا."]);
+    assert.equal(pieces(mixed).join(""), mixed);
+    assert.deepEqual(pieces(mixed).map((piece) => piece.trim()), [`He said "Stop."`, "Then he left.", "Done"]);
+    assert.deepEqual(pieces("No sentence end"), ["No sentence end"]);
+    assert.deepEqual(pieces(""), []);
   }
 });
 

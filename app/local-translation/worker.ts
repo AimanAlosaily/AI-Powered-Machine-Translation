@@ -1,6 +1,6 @@
 import { env, AutoTokenizer, AutoModelForSeq2SeqLM, type PreTrainedTokenizer, type PreTrainedModel, type Tensor } from "@huggingface/transformers";
 import { COMPACT_MODELS, type CompactPair, type WorkerReply, type WorkerRequest } from "./models";
-import { assertCompleteGeneration, MAX_NEW_TOKENS, splitToTokenBudget } from "./chunks";
+import { assertCompleteGeneration, MAX_NEW_TOKENS, splitSentences, splitToTokenBudget } from "./chunks";
 
 // This bundle is built for a dedicated browser worker, never the server.
 const scope = globalThis as unknown as {
@@ -26,6 +26,23 @@ async function translate(text: string, id: number) {
   const prefix = COMPACT_MODELS[activePair].prefix;
   const encode = (value: string) => current.tokenizer(prefix + value, { truncation: false, padding: false });
   const countTokens = (value: string) => encode(value).input_ids.size;
+  const generate = async (chunk: string) => {
+    const tokens = await current.model.generate({
+      ...encode(chunk),
+      max_new_tokens: MAX_NEW_TOKENS,
+      num_beams: 1,
+      do_sample: false,
+      return_dict_in_generate: false,
+    }) as Tensor;
+    try {
+      assertCompleteGeneration(tokens.dims[1]);
+      const result = current.tokenizer.batch_decode(tokens, { skip_special_tokens: true })[0]?.trim();
+      if (!result) throw new Error("The model returned no translation for a text block.");
+      return result;
+    } finally {
+      tokens.dispose();
+    }
+  };
   const parts = text.split(/(\r\n|\r|\n)/u);
   const output: string[] = [];
 
@@ -34,27 +51,28 @@ async function translate(text: string, id: number) {
       output.push(part);
       continue;
     }
-    const chunks = splitToTokenBudget(part, countTokens);
-    const translated: string[] = [];
-    for (let index = 0; index < chunks.length; index++) {
-      scope.postMessage({ id, type: "progress", message: `Translating text block ${index + 1} of ${chunks.length} locally` });
-      const tokens = await current.model.generate({
-        ...encode(chunks[index]),
-        max_new_tokens: MAX_NEW_TOKENS,
-        num_beams: 1,
-        do_sample: false,
-        return_dict_in_generate: false,
-      }) as Tensor;
-      try {
-        assertCompleteGeneration(tokens.dims[1]);
-        const result = current.tokenizer.batch_decode(tokens, { skip_special_tokens: true })[0]?.trim();
-        if (!result) throw new Error("The model returned no translation for a text block.");
-        translated.push(result);
-      } finally {
-        tokens.dispose();
+    // One sentence per model call (see splitSentences); only a sentence that
+    // is itself over the token budget is split further.
+    const units = splitSentences(part).map((sentence) => {
+      const core = sentence.trim();
+      const start = sentence.indexOf(core);
+      return {
+        before: sentence.slice(0, start),
+        chunks: core ? splitToTokenBudget(core, countTokens) : [],
+        after: sentence.slice(start + core.length),
+      };
+    });
+    const total = units.reduce((sum, unit) => sum + unit.chunks.length, 0);
+    let done = 0;
+    for (const unit of units) {
+      const translated: string[] = [];
+      for (const chunk of unit.chunks) {
+        done += 1;
+        scope.postMessage({ id, type: "progress", message: `Translating sentence ${done} of ${total} locally` });
+        translated.push(await generate(chunk));
       }
+      output.push(unit.before + translated.join(" ") + unit.after);
     }
-    output.push(translated.join(" "));
   }
   return output.join("");
 }

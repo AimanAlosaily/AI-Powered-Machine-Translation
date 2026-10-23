@@ -60,6 +60,14 @@ const memoryTimer = setInterval(async () => {
   finally { sampling = false; }
 }, 500);
 
+function assertEveryNumber(output, count, label) {
+  // Accept Arabic-Indic and Persian digits as well as Latin digits.
+  const latin = output.replace(/[٠-٩۰-۹]/gu, (digit) => String((digit.codePointAt(0) & 0xf)));
+  const found = new Set((latin.match(/\d+/gu) ?? []).map(Number));
+  const missing = Array.from({ length: count }, (_, i) => i + 1).filter((n) => !found.has(n));
+  assert.deepEqual(missing, [], `${label}: sentences missing from the translation`);
+}
+
 async function translate(name, source, target, text, expectedScript) {
   await page.locator('.field-grid select').nth(0).selectOption(source);
   await page.locator('.field-grid select').nth(1).selectOption(target);
@@ -85,8 +93,12 @@ try {
   await page.reload();
   await translate('offline-en.txt', 'English', 'Arabic', 'Thank you for your help.', /[\u0600-\u06ff]/u);
   await translate('offline-ar.txt', 'Arabic', 'English', 'شكرا على مساعدتك.', /[A-Za-z]/u);
-  await translate('long.txt', 'English', 'Arabic', 'This application translates documents on your device. '.repeat(40), /[\u0600-\u06ff]/u);
-  assert.ok(samples.at(-1).output.length > 400, 'Long input must not be reduced to a single short translation');
+  // Numbered sentences prove completeness: an omitted sentence loses its number.
+  // (A length check passed while 14 of 40 repeated sentences were dropped.)
+  await translate('long.txt', 'English', 'Arabic', Array.from({ length: 40 }, (_, i) => `Invoice number ${i + 1} was paid on time.`).join(' '), /[\u0600-\u06ff]/u);
+  assertEveryNumber(samples.at(-1).output, 40, 'English \u2192 Arabic long input');
+  await translate('long-ar.txt', 'Arabic', 'English', Array.from({ length: 30 }, (_, i) => `\u062a\u0645 \u062f\u0641\u0639 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629 \u0631\u0642\u0645 ${i + 1} \u0641\u064a \u0627\u0644\u0648\u0642\u062a \u0627\u0644\u0645\u062d\u062f\u062f.`).join(' '), /[A-Za-z]/u);
+  assertEveryNumber(samples.at(-1).output, 30, 'Arabic \u2192 English long input');
   // Start a real long job, cancel, and prove a new worker can run afterward.
   await page.locator('input[type=file]').setInputFiles({ name: 'cancel.txt', mimeType: 'text/plain', buffer: Buffer.from('Please translate this sentence. '.repeat(400)) });
   await page.getByRole('button', { name: 'Translate on this device', exact: true }).click();
