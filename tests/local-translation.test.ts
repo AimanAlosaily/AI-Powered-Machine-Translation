@@ -46,34 +46,21 @@ test("output cap is an error even when Marian would force an EOS token", () => {
   assert.throws(() => splitToTokenBudget("a", () => 500, 192), /exceeds/);
 });
 
-const route = (source: string, target: string) => translationPlan(source, target)!.map((stage) =>
-  [stage.model.id.replace("Xenova/", ""), stage.prefix.trim(), stage.nllb ? `${stage.nllb.source}>${stage.nllb.target}` : ""]
-    .filter(Boolean).join(" "));
-
-test("routing prefers a direct small model, then two through English, then NLLB", () => {
-  assert.deepEqual(route("en", "ar"), ["opus-mt-en-ar >>ara<<"]);
-  assert.deepEqual(route("ar", "en"), ["opus-mt-ar-en"]);
-  assert.deepEqual(route("en", "fr"), ["opus-mt-en-fr"]);
-  assert.deepEqual(route("en", "zh"), ["opus-mt-en-zh >>cmn_Hans<<"]);
-  assert.deepEqual(route("en", "zh-Hant"), ["opus-mt-en-zh >>cmn_Hant<<"]);
-  assert.deepEqual(route("en", "vi"), ["opus-mt-en-vi >>vie<<"]);
-  assert.deepEqual(route("fr", "de"), ["opus-mt-fr-en", "opus-mt-en-de"]);
-  assert.deepEqual(route("ja", "ar"), ["opus-mt-ja-en", "opus-mt-en-ar >>ara<<"]);
-  assert.deepEqual(route("en", "ja"), ["nllb-200-distilled-600M eng_Latn>jpn_Jpan"]);
-  assert.deepEqual(route("ar", "ja"), ["nllb-200-distilled-600M arb_Arab>jpn_Jpan"]);
-  assert.deepEqual(route("pt", "fr"), ["nllb-200-distilled-600M por_Latn>fra_Latn"]);
-  assert.deepEqual(route("iw", "en"), ["nllb-200-distilled-600M heb_Hebr>eng_Latn"]);
+test("Arabic ↔ English route to the pinned OPUS-MT models; nothing else is offered", () => {
+  const [enAr] = translationPlan("en", "ar")!;
+  assert.equal(enAr.model.id, "Xenova/opus-mt-en-ar");
+  assert.equal(enAr.prefix, ">>ara<< ");
+  const [arEn] = translationPlan("ar", "en")!;
+  assert.equal(arEn.model.id, "Xenova/opus-mt-ar-en");
+  assert.equal(arEn.prefix, "");
   assert.deepEqual(translationPlan("ar", "ar"), []);
-  assert.equal(translationPlan("en", "xx"), null);
-  assert.equal(planSizeMB(translationPlan("fr", "de")!), 214);
-});
-
-test("every language pair offered in the app has a pinned local route", () => {
+  assert.equal(translationPlan("en", "fr"), null);
+  assert.equal(planSizeMB(translationPlan("en", "ar")!), 111);
+  assert.deepEqual(LANGUAGES.map(([, code]) => code).sort(), ["ar", "en"]);
   for (const [, source] of LANGUAGES) {
     for (const [, target] of LANGUAGES) {
       const plan = translationPlan(source, target);
       assert.ok(plan, `${source} → ${target} has no route`);
-      assert.ok(plan.length <= 2);
       for (const stage of plan) {
         assert.match(stage.model.revision, /^[0-9a-f]{40}$/);
         assert.ok(modelFileUrls(stage.model).every((url) => url.includes(stage.model.revision)));
@@ -154,14 +141,14 @@ test("cache readiness requires every pinned file and detects eviction", async ()
   assert.equal(await isModelCached(model), false);
 });
 
-test("every pair translates with local models and no browser Translator API", async () => {
+test("Arabic ↔ English translates with the local model and no browser Translator API", async () => {
   setGlobal("Worker", FakeWorker);
   setGlobal("Translator", undefined);
   setGlobal("caches", undefined);
   assert.equal(await getPairAvailability("en", "ar"), "downloadable");
-  assert.equal(await getPairAvailability("en", "fr"), "downloadable");
-  assert.equal(await getPairAvailability("ja", "ko"), "downloadable");
-  assert.equal(await getPairAvailability("fr", "fr"), "available");
+  assert.equal(await getPairAvailability("ar", "en"), "downloadable");
+  assert.equal(await getPairAvailability("en", "en"), "available");
+  assert.equal(await getPairAvailability("en", "fr"), "unavailable");
   setGlobal("navigator", { onLine: true });
   const before = FakeWorker.instances.length;
   const result = await translateFile({
@@ -173,21 +160,9 @@ test("every pair translates with local models and no browser Translator API", as
   assert.equal(result.sections[0].content, "مرحبا بالعالم.");
   assert.match(result.qualitySummary, /OPUS-MT/);
   assert.equal(FakeWorker.instances.length, before + 1);
-  assert.equal(FakeWorker.instances.at(-1)!.terminated, true);
-
-  // A pivot runs two stages, each in its own worker, never both at once.
-  const pivot = await translateFile({
-    file: new File(["Bonjour."], "bonjour.txt"),
-    options: { sourceCode: "fr", sourceLanguage: "French", targetCode: "de", targetLanguage: "German", glossary: "" },
-    signal: new AbortController().signal,
-    onProgress() {},
-  });
-  const [first, second] = FakeWorker.instances.slice(-2);
-  assert.equal(FakeWorker.instances.length, before + 3);
-  assert.ok(first.terminated && second.terminated);
-  const stages = [first, second].map((worker) => (worker.messages[0] as { stage: { model: { id: string } } }).stage.model.id);
-  assert.deepEqual(stages, ["Xenova/opus-mt-fr-en", "Xenova/opus-mt-en-de"]);
-  assert.match(pivot.qualitySummary, /through English/);
+  const worker = FakeWorker.instances.at(-1)!;
+  assert.equal(worker.terminated, true);
+  assert.equal((worker.messages[0] as { stage: { model: { id: string } } }).stage.model.id, "Xenova/opus-mt-en-ar");
 });
 
 test("same-language extraction never requires or creates an AI model", async () => {

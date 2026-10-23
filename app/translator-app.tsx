@@ -48,7 +48,7 @@ import {
 import { LANGUAGES } from "./languages";
 
 
-const RTL_CODES = new Set(["ar", "iw"]);
+const RTL_CODES = new Set(["ar"]);
 const ACCEPTED_FILES =
   ".pdf,.docx,.rtf,.odt,.txt,.md,.csv,.pptx,.png,.jpg,.jpeg,.webp";
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -86,17 +86,6 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-function routeDetail(plan: Plan) {
-  if (!plan || plan.length === 0) return "";
-  if (plan.length === 2) {
-    return "No direct small model exists for this pair, so Verta chains two OPUS-MT models through English, one at a time.";
-  }
-  if (plan[0].model.family === "nllb") {
-    return "Uses NLLB-200, a larger multilingual model. On a 6 GB device, close other heavy tabs first.";
-  }
-  return "Uses a small OPUS-MT model for this direction.";
-}
-
 function statusCopy(status: PairStatus, online: boolean, plan: Plan) {
   if (plan && plan.length === 0) {
     return { title: "Same language", detail: "Verta extracts the text without translating it." };
@@ -105,17 +94,17 @@ function statusCopy(status: PairStatus, online: boolean, plan: Plan) {
     return { title: "Local model unavailable", detail: "Use a current browser with WebAssembly and Web Workers." };
   }
   if (status === "unavailable" || !plan) {
-    return { title: "Pair unavailable", detail: "No local model covers this combination. Choose another pair." };
+    return { title: "Pair unavailable", detail: "Verta translates between Arabic and English." };
   }
   if (status === "checking") {
     return { title: "Checking saved models", detail: "Looking for this pair’s model files on this device." };
   }
   if (status === "available") {
-    return { title: "Ready offline", detail: `${routeDetail(plan)} Runs on this device; no GPU or API key needed.` };
+    return { title: "Model ready offline", detail: "This direction’s open-weight model is saved on this device. No GPU or API key needed." };
   }
   return {
     title: online ? `One-time download · about ${planSizeMB(plan)} MB` : "Connect once to download this model",
-    detail: `${routeDetail(plan)} Later translations in this direction work offline.`,
+    detail: "Each direction downloads its small open-weight model once; after that it works offline.",
   };
 }
 
@@ -440,7 +429,7 @@ export function TranslatorApp() {
             <span>Nothing out.</span>
           </h1>
           <p className="hero-lede">
-            Translate documents between 35 languages with small open-weight
+            Translate Arabic and English documents with small open-weight
             models that run on your CPU. No account, API key, or file upload.
           </p>
 
@@ -459,14 +448,14 @@ export function TranslatorApp() {
             </div>
           </div>
 
-          <div className="language-line" aria-label="Example languages">
+          <div className="language-line" aria-label="Arabic and English">
             <span>مرحباً</span>
             <i aria-hidden="true" />
-            <span>Bonjour</span>
+            <span>Hello</span>
             <i aria-hidden="true" />
-            <span>こんにちは</span>
+            <span>شكراً</span>
             <i aria-hidden="true" />
-            <span>Hola</span>
+            <span>Thank you</span>
           </div>
         </div>
 
@@ -669,8 +658,8 @@ export function TranslatorApp() {
 
           <p className="consent-note">
             Nothing is uploaded. Each direction downloads its open-weight model
-            once from Hugging Face; keep site data to reuse it offline. Image OCR
-            supports English and Arabic.
+            (about 111 MB) once from Hugging Face; keep site data to reuse it
+            offline. Image OCR reads English and Arabic.
           </p>
         </form>
       </section>
@@ -703,8 +692,8 @@ export function TranslatorApp() {
             <Languages size={24} aria-hidden="true" />
             <h3>A small local model</h3>
             <p>
-              Every pair runs on the CPU with one model loaded at a time, one
-              sentence at a time. Its memory is released when the work ends.
+              Arabic ↔ English runs on the CPU, one sentence at a time, with a
+              single 8-bit model loaded. Its memory is released when it ends.
             </p>
           </article>
           <article className="method-card">

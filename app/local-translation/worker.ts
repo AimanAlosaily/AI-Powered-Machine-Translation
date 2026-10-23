@@ -17,47 +17,21 @@ env.backends.onnx.wasm!.numThreads = 1;
 env.backends.onnx.wasm!.proxy = false;
 
 type Encoded = Record<string, unknown> & { input_ids: Tensor };
-// Transformers.js 3.8.1 (pinned) builds NLLB inputs with this method: it puts
-// the source language token first and returns the target language token id.
-type NllbTokenizer = PreTrainedTokenizer & {
-  _build_translation_inputs(
-    text: string,
-    options: { padding: boolean; truncation: boolean },
-    kwargs: { src_lang: string; tgt_lang: string; forced_bos_token_id?: number },
-  ): Encoded;
-};
 
 let loaded: { tokenizer: PreTrainedTokenizer; model: PreTrainedModel; stage: Stage } | undefined;
 let busy = false;
 
-function encoder(current: NonNullable<typeof loaded>) {
-  const { tokenizer, stage } = current;
-  if (stage.nllb) {
-    const nllb = stage.nllb;
-    return (value: string) => {
-      const kwargs: { src_lang: string; tgt_lang: string; forced_bos_token_id?: number } = { src_lang: nllb.source, tgt_lang: nllb.target };
-      const inputs = (tokenizer as unknown as NllbTokenizer)._build_translation_inputs(value, { padding: false, truncation: false }, kwargs);
-      if (typeof kwargs.forced_bos_token_id !== "number") throw new Error("The model does not support this target language.");
-      return { inputs, extra: { forced_bos_token_id: kwargs.forced_bos_token_id } };
-    };
-  }
-  return (value: string) => ({
-    inputs: tokenizer(stage.prefix + value, { truncation: false, padding: false }) as unknown as Encoded,
-    extra: {},
-  });
-}
-
 async function translate(text: string, id: number) {
   if (!loaded) throw new Error("The local model is not ready.");
   const current = loaded;
-  const encode = encoder(current);
-  const countTokens = (value: string) => encode(value).inputs.input_ids.size;
+  // English → Arabic needs the ">>ara<<" target prefix on every input.
+  const encode = (value: string) =>
+    current.tokenizer(current.stage.prefix + value, { truncation: false, padding: false }) as unknown as Encoded;
+  const countTokens = (value: string) => encode(value).input_ids.size;
   const generate = async (chunk: string) => {
-    const { inputs, extra } = encode(chunk);
     // generate() forwards generation settings as untyped kwargs.
     const options = {
-      ...inputs,
-      ...extra,
+      ...encode(chunk),
       max_new_tokens: MAX_NEW_TOKENS,
       num_beams: 1,
       do_sample: false,
@@ -130,17 +104,6 @@ scope.onmessage = async ({ data }) => {
         dtype: "q8",
         device: "wasm",
         progress_callback,
-        // NLLB's weights are about 8x OPUS-MT's. Graph optimization can fold
-        // its 8-bit embedding tables back into float32 copies, so it is off,
-        // along with pre-packed weight copies and the growing memory arena.
-        ...(model.family === "nllb" ? {
-          session_options: {
-            graphOptimizationLevel: "disabled",
-            enableCpuMemArena: false,
-            enableMemPattern: false,
-            extra: { session: { disable_prepacking: "1" } },
-          },
-        } : {}),
       });
       loaded = { tokenizer, model: loadedModel, stage: data.stage };
       scope.postMessage({ id: data.id, type: "ready" });

@@ -1,6 +1,6 @@
 import { strFromU8, unzipSync } from "fflate";
 import { createCompactTranslator, supportsCompactTranslation } from "./local-translation/client";
-import { isPlanCached, translationPlan, type Stage } from "./local-translation/models";
+import { isPlanCached, translationPlan } from "./local-translation/models";
 
 export { planSizeMB, translationPlan } from "./local-translation/models";
 
@@ -425,17 +425,7 @@ export async function getPairAvailability(
   return (await isPlanCached(plan)) ? "available" : "downloadable";
 }
 
-function languageName(code: string) {
-  try {
-    return new Intl.DisplayNames(["en"], { type: "language" }).of(code === "iw" ? "he" : code) ?? code;
-  } catch {
-    return code;
-  }
-}
-
-function modelLabel(stage: Stage) {
-  return stage.model.family === "nllb" ? "NLLB-200 (600M, 8-bit)" : "OPUS-MT (8-bit)";
-}
+const LANGUAGE_NAMES: Record<string, string> = { ar: "Arabic", en: "English" };
 
 export async function translateFile({
   file,
@@ -453,7 +443,7 @@ export async function translateFile({
 
   const plan = translationPlan(options.sourceCode, options.targetCode);
   if (!plan) {
-    throw new Error(`No local model covers ${options.sourceLanguage} → ${options.targetLanguage}.`);
+    throw new Error("Verta translates between Arabic and English.");
   }
   if (plan.length > 0 && !supportsCompactTranslation()) {
     throw new Error("This browser needs WebAssembly and Web Workers for local translation.");
@@ -485,28 +475,23 @@ export async function translateFile({
     ...extracted.sections.map((section) => section.content),
   ];
 
-  for (let stageIndex = 0; stageIndex < plan.length; stageIndex += 1) {
+  for (const stage of plan) {
     abortIfNeeded(signal);
-    const stage = plan[stageIndex];
-    const step = plan.length > 1 ? ` (step ${stageIndex + 1} of ${plan.length})` : "";
-    const span = 60 / plan.length;
-    const base = 35 + span * stageIndex;
     onProgress({
-      progress: Math.round(base),
-      message: `Loading the ${languageName(stage.source)} → ${languageName(stage.target)} model${step}`,
+      progress: 35,
+      message: `Loading the ${LANGUAGE_NAMES[stage.source]} → ${LANGUAGE_NAMES[stage.target]} model`,
     });
-    // Only one model is resident at a time; each worker is terminated before
-    // the next stage loads.
+    // One model in one worker; the worker is terminated when this ends.
     const translator = await createCompactTranslator(stage, signal, (message) => {
-      onProgress({ progress: Math.round(base), message: `${message}${step}` });
+      onProgress({ progress: 35, message });
     });
     try {
       const output: string[] = [];
       for (let index = 0; index < texts.length; index += 1) {
         abortIfNeeded(signal);
         onProgress({
-          progress: Math.round(base + span * ((index + 1) / texts.length)),
-          message: `Translating section ${index + 1} of ${texts.length}${step}`,
+          progress: Math.round(35 + 60 * ((index + 1) / texts.length)),
+          message: `Translating section ${index + 1} of ${texts.length}`,
         });
         output.push(await translator.translate(texts[index]));
       }
@@ -552,9 +537,7 @@ export async function translateFile({
   const route =
     plan.length === 0
       ? "Source text retained without translation."
-      : plan.length === 2
-        ? `Translated on this device with two ${modelLabel(plan[0])} models through English (${options.sourceLanguage} → English → ${options.targetLanguage}).`
-        : `Translated on this device with ${modelLabel(plan[0])}.`;
+      : "Translated on this device with the open-weight OPUS-MT model (8-bit).";
 
   return {
     sourceLanguage: options.sourceLanguage,
@@ -568,9 +551,7 @@ export async function translateFile({
     translationNotes: [
       "No file, key, or translation text was sent to Verta or a cloud API.",
       "Offline mode favors privacy and cost over advanced context rewriting.",
-      ...(plan.length > 0 ? ["Small open-weight models translate one sentence at a time. They do not reason over the entire document; glossary replacement is best-effort."] : []),
-      ...(plan.length === 2 ? ["No direct small model exists for this pair, so the text was translated into English and then into the target language. Some nuance can be lost in the intermediate step."] : []),
-      ...(plan.some((stage) => stage.model.family === "nllb") ? ["NLLB-200 is released under CC-BY-NC-4.0 (non-commercial use)."] : []),
+      ...(plan.length > 0 ? ["The small open-weight model translates one sentence at a time. It does not reason over the entire document; glossary replacement is best-effort."] : []),
     ],
     terminology,
     reviewFlags,

@@ -1,7 +1,8 @@
-// Opt-in integration test: downloads real pinned models (about 228 MB total).
+// Opt-in integration test: downloads both pinned models (about 222 MB total).
 // Build the GitHub Pages export first; run with pnpm run test:browser.
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
+import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { createServer } from 'node:http';
 import { readFile, stat, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
@@ -108,27 +109,42 @@ try {
   await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
   await translate('meeting.txt', 'English', 'Arabic', 'The meeting is tomorrow at ten in the morning.', /[\u0600-\u06ff]/u);
   await translate('arabic.txt', 'Arabic', 'English', 'هذا البرنامج يترجم المستندات على جهازك دون إرسالها إلى الإنترنت.', /[A-Za-z]/u);
-  // The other routes: a direct small model, two small models through English,
-  // and the NLLB-200 fallback. None of them may use a browser translator API.
+  // Translator was removed from the page above; Verta must not need it.
   assert.equal(await page.evaluate(() => typeof globalThis.Translator), 'undefined');
-  await translate('en-fr.txt', 'English', 'French', 'The meeting is tomorrow at ten in the morning.', /[A-Za-zÀ-ÿ]/u);
-  assert.notEqual(samples.at(-1).output.trim(), samples.at(-1).input);
-  await translate('fr-de.txt', 'French', 'German', 'Merci beaucoup pour votre aide.', /[A-Za-zÄÖÜäöüß]/u);
-  assert.notEqual(samples.at(-1).output.trim(), samples.at(-1).input);
-  await translate('en-ja.txt', 'English', 'Japanese', 'Thank you for your help.', /[぀-ヿ一-鿿]/u);
   // A fresh worker and a reloaded page must both work without network access.
   await context.setOffline(true);
   await page.reload();
   await translate('offline-en.txt', 'English', 'Arabic', 'Thank you for your help.', /[\u0600-\u06ff]/u);
   await translate('offline-ar.txt', 'Arabic', 'English', 'شكرا على مساعدتك.', /[A-Za-z]/u);
-  await translate('offline-en-ja.txt', 'English', 'Japanese', 'The meeting is tomorrow.', /[぀-ヿ一-鿿]/u);
-  await translate('offline-fr-de.txt', 'French', 'German', 'La réunion est demain.', /[A-Za-zÄÖÜäöüß]/u);
   // Numbered sentences prove completeness: an omitted sentence loses its number.
   // (A length check passed while 14 of 40 repeated sentences were dropped.)
   await translate('long.txt', 'English', 'Arabic', Array.from({ length: 40 }, (_, i) => `Invoice number ${i + 1} was paid on time.`).join(' '), /[\u0600-\u06ff]/u);
   assertEveryNumber(samples.at(-1).output, 40, 'English \u2192 Arabic long input');
   await translate('long-ar.txt', 'Arabic', 'English', Array.from({ length: 30 }, (_, i) => `\u062a\u0645 \u062f\u0641\u0639 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629 \u0631\u0642\u0645 ${i + 1} \u0641\u064a \u0627\u0644\u0648\u0642\u062a \u0627\u0644\u0645\u062d\u062f\u062f.`).join(' '), /[A-Za-z]/u);
   assertEveryNumber(samples.at(-1).output, 30, 'Arabic \u2192 English long input');
+  // A Word document in, a Word document out, still offline.
+  const docx = zipSync({
+    '[Content_Types].xml': strToU8('<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    '_rels/.rels': strToU8('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+    'word/document.xml': strToU8('<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Quarterly report</w:t></w:r></w:p><w:p><w:r><w:t>Sales grew by 12 percent this quarter. The team will meet again next month.</w:t></w:r></w:p></w:body></w:document>'),
+  });
+  await page.locator('.field-grid select').nth(0).selectOption('English');
+  await page.locator('.field-grid select').nth(1).selectOption('Arabic');
+  await page.locator('input[type=file]').setInputFiles({ name: 'report.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from(docx) });
+  await page.getByRole('button', { name: 'Translate on this device', exact: true }).click();
+  await page.locator('.result-section, .error-banner').waitFor({ timeout: 300000 });
+  if (await page.locator('.error-banner').count()) throw new Error(await page.locator('.error-banner').innerText());
+  const docxPreview = await page.locator('.document-preview').innerText();
+  assert.match(docxPreview, /[؀-ۿ]/u);
+  assert.ok(docxPreview.includes('12') || docxPreview.includes('١٢'), 'DOCX translation lost the number 12');
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Download Word file' }).click(),
+  ]);
+  const exported = unzipSync(new Uint8Array(await readFile(await download.path())));
+  const exportedXml = strFromU8(exported['word/document.xml']);
+  assert.match(exportedXml, /[؀-ۿ]/u, 'Exported Word file has no Arabic text');
+  console.log(JSON.stringify({ name: 'report.docx', output: docxPreview, exportedFile: download.suggestedFilename(), exportedBytes: (await readFile(await download.path())).length }));
   // Start a real long job, cancel, and prove a new worker can run afterward.
   await page.locator('input[type=file]').setInputFiles({ name: 'cancel.txt', mimeType: 'text/plain', buffer: Buffer.from('Please translate this sentence. '.repeat(400)) });
   await page.getByRole('button', { name: 'Translate on this device', exact: true }).click();
