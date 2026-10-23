@@ -1,4 +1,8 @@
 import { strFromU8, unzipSync } from "fflate";
+import { createCompactTranslator, supportsCompactTranslation } from "./local-translation/client";
+import { compactPair, isModelCached } from "./local-translation/models";
+
+export { compactPair } from "./local-translation/models";
 
 export type TranslationSection = {
   kind:
@@ -478,6 +482,11 @@ export async function getPairAvailability(
   targetCode: string,
 ) {
   if (sourceCode === targetCode) return "available" as Availability;
+  const pair = compactPair(sourceCode, targetCode);
+  if (pair) {
+    if (!supportsCompactTranslation()) return "unsupported" as const;
+    return (await isModelCached(pair)) ? "available" as const : "downloadable" as const;
+  }
   if (typeof Translator === "undefined") return "unsupported" as const;
 
   try {
@@ -504,16 +513,20 @@ export async function translateFile({
   validateFile(file);
   abortIfNeeded(signal);
 
-  if (typeof Translator === "undefined") {
+  const pair = compactPair(options.sourceCode, options.targetCode);
+  const sameLanguage = options.sourceCode === options.targetCode;
+  if (!pair && !sameLanguage && typeof Translator === "undefined") {
     throw new Error(
-      "Offline translation needs desktop Chrome 138 or newer. This browser does not provide an on-device translation model.",
+      "This language pair needs a browser with the Translator API. English ↔ Arabic uses Verta's compact model and works without that API.",
     );
   }
 
-  let translator: Translator | undefined;
+  let browserTranslator: Translator | undefined;
+  let translator: { translate: (text: string, options?: { signal: AbortSignal }) => Promise<string>; destroy: () => void } | undefined;
 
   try {
-    if (options.sourceCode !== options.targetCode) {
+    // Chrome requires user activation, so create its translator before extraction.
+    if (!pair && !sameLanguage) {
       const availability = await Translator.availability({
         sourceLanguage: options.sourceCode,
         targetLanguage: options.targetCode,
@@ -530,7 +543,7 @@ export async function translateFile({
         );
       }
 
-      translator = await Translator.create({
+      browserTranslator = await Translator.create({
         sourceLanguage: options.sourceCode,
         targetLanguage: options.targetCode,
         signal,
@@ -543,6 +556,7 @@ export async function translateFile({
           });
         },
       });
+      translator = browserTranslator;
     }
 
     const extracted = await extractDocument(
@@ -551,6 +565,16 @@ export async function translateFile({
       signal,
       onProgress,
     );
+    if (pair) {
+      // Finish and terminate OCR/PDF workers before allocating model memory.
+      if (!navigator.onLine && !(await isModelCached(pair))) {
+        throw new Error("This compact model is not fully cached. Connect once and complete a translation in this direction before using it offline.");
+      }
+      onProgress({ progress: 30, message: "Loading the compact English–Arabic model" });
+      translator = await createCompactTranslator(pair, signal, (message) => {
+        onProgress({ progress: 35, message });
+      });
+    }
     const glossary = parseGlossary(options.glossary);
     const terminology: TranslationResult["terminology"] = [];
     const automaticTerms = new Map<string, string>();
@@ -592,7 +616,9 @@ export async function translateFile({
 
       let content = section.content;
       if (translator) {
-        const chunks = await fitToQuota(translator, content);
+        // The compact worker splits by its actual tokenizer and rejects output
+        // truncation; Chrome's own model has a separate input quota.
+        const chunks = browserTranslator ? await fitToQuota(browserTranslator, content) : [content];
         const translatedChunks: string[] = [];
         for (const chunk of chunks) {
           abortIfNeeded(signal);
@@ -644,11 +670,11 @@ export async function translateFile({
         translatedSections.find((section) => section.kind === "title")
           ?.content ?? titleFromFilename(file.name),
       sections: translatedSections,
-      qualitySummary:
-        "Translated on this device with the browser's language pack. Section order and preferred terminology were preserved, and numeric item counts were compared.",
+      qualitySummary: `${sameLanguage ? "Source text retained without translation." : pair ? "Translated on this device with the compact OPUS-MT model (8-bit)." : "Translated on this device with the browser's language pack."} Section order was preserved, preferred terminology replacements were applied, and numeric item counts were compared.`,
       translationNotes: [
         "No file, key, or translation text was sent to Verta or a cloud API.",
         "Offline mode favors privacy and cost over advanced context rewriting.",
+        ...(pair ? ["English–Arabic translation uses a small sentence-level model. It does not reason over the entire document; glossary replacement is best-effort."] : []),
       ],
       terminology,
       reviewFlags,

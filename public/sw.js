@@ -1,9 +1,14 @@
-const CACHE_NAME = "verta-offline-v2";
+const CACHE_NAME = "verta-offline-v3";
 const APP_ROOT = new URL("./", self.registration.scope).href;
 const CORE_ASSETS = [
   new URL("manifest.webmanifest", APP_ROOT).href,
   new URL("icon-192.png", APP_ROOT).href,
   new URL("icon-512.png", APP_ROOT).href,
+  // A worker can start before the page is controlled on the first visit.
+  // Precache the engine explicitly instead of relying on intercepted requests.
+  new URL("offline/translation-worker.js", APP_ROOT).href,
+  new URL("offline/ort-wasm-simd-threaded.jsep.mjs", APP_ROOT).href,
+  new URL("offline/ort-wasm-simd-threaded.jsep.wasm", APP_ROOT).href,
 ];
 
 async function precacheAppShell() {
@@ -59,9 +64,9 @@ self.addEventListener("fetch", (event) => {
       fetch(request)
         .then((response) => {
           const copy = response.clone();
-          void caches
+          event.waitUntil(caches
             .open(CACHE_NAME)
-            .then((cache) => cache.put(APP_ROOT, copy));
+            .then((cache) => cache.put(APP_ROOT, copy)));
           return response;
         })
         .catch(async () => (await caches.match(APP_ROOT)) || Response.error()),
@@ -76,9 +81,9 @@ self.addEventListener("fetch", (event) => {
         fetch(request).then((response) => {
           if (response.ok) {
             const copy = response.clone();
-            void caches
+            event.waitUntil(caches
               .open(CACHE_NAME)
-              .then((cache) => cache.put(request, copy));
+              .then((cache) => cache.put(request, copy)));
           }
           return response;
         }),

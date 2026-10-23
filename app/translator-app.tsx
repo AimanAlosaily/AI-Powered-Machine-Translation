@@ -31,8 +31,10 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
+  compactPair,
   getFileExtension,
   getFullTranslation,
   getPairAvailability,
@@ -122,11 +124,17 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-function statusCopy(status: PairStatus, online: boolean) {
+function statusCopy(status: PairStatus, online: boolean, compact: boolean) {
+  if (compact) {
+    if (status === "unsupported") return { title: "Local model unavailable", detail: "Use a browser with WebAssembly and Web Workers." };
+    if (status === "available") return { title: "Compact model cached", detail: "English ↔ Arabic runs locally. No GPU or API key needed." };
+    if (status === "checking") return { title: "Checking compact model", detail: "Checking this direction’s saved model files." };
+    return { title: online ? "Compact model · about 114 MB" : "Connect once to download this model", detail: "English ↔ Arabic uses OPUS-MT. Each direction downloads separately." };
+  }
   if (status === "unsupported") {
     return {
       title: "Desktop Chrome 138+ required",
-      detail: "This browser does not expose an on-device translation model.",
+      detail: "This pair needs Chrome’s Translator API. English ↔ Arabic also works with Verta’s compact model.",
     };
   }
   if (status === "unavailable") {
@@ -161,6 +169,25 @@ function statusCopy(status: PairStatus, online: boolean) {
   };
 }
 
+function subscribeOnline(notify: () => void) {
+  window.addEventListener("online", notify);
+  window.addEventListener("offline", notify);
+  return () => {
+    window.removeEventListener("online", notify);
+    window.removeEventListener("offline", notify);
+  };
+}
+
+function subscribeInstalled(notify: () => void) {
+  const media = window.matchMedia("(display-mode: standalone)");
+  media.addEventListener("change", notify);
+  window.addEventListener("appinstalled", notify);
+  return () => {
+    media.removeEventListener("change", notify);
+    window.removeEventListener("appinstalled", notify);
+  };
+}
+
 export function TranslatorApp() {
   const [file, setFile] = useState<File | null>(null);
   const [sourceLanguage, setSourceLanguage] = useState("English");
@@ -173,11 +200,11 @@ export function TranslatorApp() {
   const [result, setResult] = useState<TranslationResult | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [pairStatus, setPairStatus] = useState<PairStatus>("checking");
-  const [isOnline, setIsOnline] = useState(true);
+  const [pairState, setPairState] = useState<{ pair: string; status: PairStatus }>({ pair: "", status: "checking" });
+  const isOnline = useSyncExternalStore(subscribeOnline, () => navigator.onLine, () => true);
   const [installPrompt, setInstallPrompt] =
     useState<InstallPromptEvent | null>(null);
-  const [isInstalled, setIsInstalled] = useState(false);
+  const isInstalled = useSyncExternalStore(subscribeInstalled, () => window.matchMedia("(display-mode: standalone)").matches, () => false);
   const inputRef = useRef<HTMLInputElement>(null);
   const controllerRef = useRef<AbortController | null>(null);
 
@@ -185,33 +212,25 @@ export function TranslatorApp() {
     LANGUAGES.find(([name]) => name === sourceLanguage)?.[1] ?? "en";
   const targetCode =
     LANGUAGES.find(([name]) => name === targetLanguage)?.[1] ?? "ar";
+  const pairKey = `${sourceCode}-${targetCode}`;
+  const pairStatus = pairState.pair === pairKey ? pairState.status : "checking";
   const isRtl = RTL_CODES.has(targetCode);
   const isWorking = phase === "reading" || phase === "translating";
   const translationText = useMemo(
     () => (result ? getFullTranslation(result) : ""),
     [result],
   );
-  const engineCopy = statusCopy(pairStatus, isOnline);
+  const engineCopy = statusCopy(pairStatus, isOnline, Boolean(compactPair(sourceCode, targetCode)));
 
   useEffect(() => {
-    setIsOnline(navigator.onLine);
-    setIsInstalled(
-      window.matchMedia("(display-mode: standalone)").matches,
-    );
-
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
     const handleInstallPrompt = (event: Event) => {
       event.preventDefault();
       setInstallPrompt(event as InstallPromptEvent);
     };
     const handleInstalled = () => {
       setInstallPrompt(null);
-      setIsInstalled(true);
     };
 
-    window.addEventListener("online", handleOnline);
-    window.addEventListener("offline", handleOffline);
     window.addEventListener("beforeinstallprompt", handleInstallPrompt);
     window.addEventListener("appinstalled", handleInstalled);
 
@@ -223,8 +242,6 @@ export function TranslatorApp() {
 
     return () => {
       controllerRef.current?.abort();
-      window.removeEventListener("online", handleOnline);
-      window.removeEventListener("offline", handleOffline);
       window.removeEventListener("beforeinstallprompt", handleInstallPrompt);
       window.removeEventListener("appinstalled", handleInstalled);
     };
@@ -232,14 +249,13 @@ export function TranslatorApp() {
 
   useEffect(() => {
     let active = true;
-    setPairStatus("checking");
     void getPairAvailability(sourceCode, targetCode).then((availability) => {
-      if (active) setPairStatus(availability);
+      if (active) setPairState({ pair: `${sourceCode}-${targetCode}`, status: availability });
     });
     return () => {
       active = false;
     };
-  }, [sourceCode, targetCode]);
+  }, [sourceCode, targetCode, isOnline, phase]);
 
   const chooseFile = (nextFile?: File) => {
     if (!nextFile) return;
@@ -273,6 +289,7 @@ export function TranslatorApp() {
 
   const handleTranslate = async (event: FormEvent) => {
     event.preventDefault();
+    if (controllerRef.current) return;
     if (!file) {
       setError("Choose a document or image first.");
       setPhase("error");
@@ -299,7 +316,8 @@ export function TranslatorApp() {
         },
         signal: controller.signal,
         onProgress(update) {
-          setProgress(update.progress);
+          if (controllerRef.current !== controller || controller.signal.aborted) return;
+          setProgress((previous) => Math.max(previous, update.progress));
           setProgressMessage(update.message);
           setPhase(
             /translat|language pack/i.test(update.message)
@@ -308,9 +326,11 @@ export function TranslatorApp() {
           );
         },
       });
+      if (controllerRef.current !== controller || controller.signal.aborted) return;
       setResult(nextResult);
       setPhase("done");
     } catch (translationError) {
+      if (controllerRef.current !== controller) return;
       if (
         translationError instanceof DOMException &&
         translationError.name === "AbortError"
@@ -325,17 +345,19 @@ export function TranslatorApp() {
       );
       setPhase("error");
     } finally {
-      controllerRef.current = null;
+      if (controllerRef.current === controller) controllerRef.current = null;
     }
   };
 
   const cancelTranslation = () => {
     controllerRef.current?.abort();
+    controllerRef.current = null;
     setPhase("idle");
   };
 
   const reset = () => {
     controllerRef.current?.abort();
+    controllerRef.current = null;
     setFile(null);
     setResult(null);
     setError("");
@@ -467,9 +489,8 @@ export function TranslatorApp() {
             <span>Nothing out.</span>
           </h1>
           <p className="hero-lede">
-            Verta reads and translates on your device with the language model
-            already built into supported desktop browsers. No account, API key,
-            or file upload.
+            Translate English and Arabic on your device with a compact model,
+            even without a dedicated GPU. No account, API key, or file upload.
           </p>
 
           <div className="proof-strip">
@@ -479,7 +500,7 @@ export function TranslatorApp() {
             </div>
             <div>
               <strong>02</strong>
-              <span>Browser language packs</span>
+              <span>Compact local model</span>
             </div>
             <div>
               <strong>03</strong>
@@ -515,6 +536,7 @@ export function TranslatorApp() {
             ref={inputRef}
             className="sr-only"
             type="file"
+            disabled={isWorking}
             accept={ACCEPTED_FILES}
             onChange={(event) => chooseFile(event.target.files?.[0])}
           />
@@ -584,6 +606,7 @@ export function TranslatorApp() {
             <label className="field">
               <span>Source language</span>
               <select
+                disabled={isWorking}
                 value={sourceLanguage}
                 onChange={(event) => setSourceLanguage(event.target.value)}
               >
@@ -597,6 +620,7 @@ export function TranslatorApp() {
             <label className="field">
               <span>Target language</span>
               <select
+                disabled={isWorking}
                 value={targetLanguage}
                 onChange={(event) => setTargetLanguage(event.target.value)}
               >
@@ -645,6 +669,7 @@ export function TranslatorApp() {
               <label className="field">
                 <span>Glossary</span>
                 <textarea
+                  disabled={isWorking}
                   value={glossary}
                   onChange={(event) => setGlossary(event.target.value)}
                   placeholder={"One term per line, for example:\nconsideration → المقابل"}
@@ -692,9 +717,10 @@ export function TranslatorApp() {
           )}
 
           <p className="consent-note">
-            Nothing is uploaded. The first use of a language pair downloads a
-            browser-managed pack; that pair can then work without internet.
-            Image OCR is currently limited to English and Arabic source text.
+            Nothing is uploaded. English ↔ Arabic downloads a small open-weight
+            model once per direction; keep site data to reuse it offline. Other
+            languages use supported browsers’ language packs. Image OCR supports
+            English and Arabic.
           </p>
         </form>
       </section>
@@ -725,10 +751,10 @@ export function TranslatorApp() {
           <article className="method-card">
             <span>02</span>
             <Languages size={24} aria-hidden="true" />
-            <h3>Built-in translation</h3>
+            <h3>A small local model</h3>
             <p>
-              Supported desktop browsers provide their own language packs. A
-              pair is downloaded once and stays on the device.
+              English ↔ Arabic runs on the CPU with one compact model loaded
+              at a time. Its memory is released when the translation ends.
             </p>
           </article>
           <article className="method-card">
