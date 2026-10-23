@@ -43,6 +43,7 @@ const samples = [];
 // Chromium processes are split rather than counted once per process. Peaks are
 // tracked per translation and per process type (browser, renderer, utility…).
 let overallPeakMiB = 0;
+let latestMiB = 0;
 let peak = { totalMiB: 0, byType: {} };
 let sampling = false;
 const cdp = await context.browser().newBrowserCDPSession();
@@ -62,6 +63,7 @@ const memoryTimer = setInterval(async () => {
       } catch { /* The process may have exited between samples. */ }
     }
     const totalMiB = totalKiB / 1024;
+    latestMiB = totalMiB;
     overallPeakMiB = Math.max(overallPeakMiB, totalMiB);
     if (totalMiB > peak.totalMiB) {
       peak = { totalMiB, byType: Object.fromEntries(Object.entries(byType).map(([key, value]) => [key, Math.round(value / 1024)])) };
@@ -107,6 +109,8 @@ try {
   });
   await page.goto(url);
   await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
+  await page.waitForTimeout(2000);
+  const baselinePssMiB = Math.round(latestMiB);
   await translate('meeting.txt', 'English', 'Arabic', 'The meeting is tomorrow at ten in the morning.', /[\u0600-\u06ff]/u);
   // Translator was removed from the page above; Verta must not need it.
   assert.equal(await page.evaluate(() => typeof globalThis.Translator), 'undefined');
@@ -156,9 +160,13 @@ try {
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await translate('after-cancel.txt', 'English', 'Arabic', 'Hello world.', /[\u0600-\u06ff]/u);
   assert.deepEqual(errors, []);
+  // Memory a few seconds after the last job: shows whether finished workers'
+  // memory is returned (lag) or kept (leak).
+  await page.waitForTimeout(8000);
+  const settledPssMiB = Math.round(latestMiB);
   await mkdir('work', { recursive: true });
   await page.screenshot({ path: 'work/compact-model-browser.png', fullPage: true });
-  console.log(JSON.stringify({ passed: true, samples: samples.length, browser: context.browser().version(), peakBrowserPssMiB: Math.round(overallPeakMiB), note: 'Sum of Linux PSS over all Chromium processes, sampled every 250 ms; short spikes between samples can be missed. Not a 6 GB device benchmark or quality benchmark.' }));
+  console.log(JSON.stringify({ passed: true, samples: samples.length, browser: context.browser().version(), peakBrowserPssMiB: Math.round(overallPeakMiB), baselinePssMiB, settledPssMiB, note: 'Sum of Linux PSS over all Chromium processes, sampled every 250 ms; short spikes between samples can be missed. Not a 6 GB device benchmark or quality benchmark.' }));
 } finally {
   clearInterval(memoryTimer);
   await context.close();
