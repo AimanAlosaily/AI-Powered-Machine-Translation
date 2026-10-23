@@ -1,4 +1,4 @@
-import type { CompactPair, WorkerReply, WorkerRequest } from "./models";
+import type { Stage, WorkerReply, WorkerRequest } from "./models";
 
 let activeWorker: Worker | undefined;
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -8,7 +8,7 @@ export function supportsCompactTranslation() {
 }
 
 export async function createCompactTranslator(
-  pair: CompactPair,
+  stage: Stage,
   signal: AbortSignal,
   onMessage: (message: string) => void,
 ) {
@@ -65,11 +65,11 @@ export async function createCompactTranslator(
   }
 
   try {
-    await request({ id: ++nextId, type: "init", pair });
+    await request({ id: ++nextId, type: "init", stage });
   } catch (error) {
     destroy();
     if (error instanceof Error && /fetch|network/i.test(error.message)) {
-      throw new Error("The compact model could not be downloaded. Check your connection and access to huggingface.co, then retry. No document text was uploaded.");
+      throw new Error("The translation model could not be downloaded. Check your connection and access to huggingface.co, then retry. No document text was uploaded.");
     }
     throw error;
   }

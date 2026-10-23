@@ -1,4 +1,4 @@
-const CACHE_NAME = "verta-offline-v3";
+const CACHE_NAME = "verta-offline-v4";
 const APP_ROOT = new URL("./", self.registration.scope).href;
 const CORE_ASSETS = [
   new URL("manifest.webmanifest", APP_ROOT).href,

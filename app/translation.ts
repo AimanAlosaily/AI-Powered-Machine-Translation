@@ -1,8 +1,8 @@
 import { strFromU8, unzipSync } from "fflate";
 import { createCompactTranslator, supportsCompactTranslation } from "./local-translation/client";
-import { compactPair, isModelCached } from "./local-translation/models";
+import { isPlanCached, translationPlan, type Stage } from "./local-translation/models";
 
-export { compactPair } from "./local-translation/models";
+export { planSizeMB, translationPlan } from "./local-translation/models";
 
 export type TranslationSection = {
   kind:
@@ -403,100 +403,38 @@ function replaceTerm(text: string, automatic: string, preferred: string) {
   );
 }
 
-function roughChunks(text: string, maximum = 1800) {
-  if (text.length <= maximum) return [text];
-
-  const sentences = text.split(/(?<=[.!?。！？])\s+|\n+/u);
-  const chunks: string[] = [];
-  let current = "";
-
-  for (const sentence of sentences) {
-    if (sentence.length > maximum) {
-      if (current) chunks.push(current);
-      for (let index = 0; index < sentence.length; index += maximum) {
-        chunks.push(sentence.slice(index, index + maximum));
-      }
-      current = "";
-    } else if (!current || current.length + sentence.length + 1 <= maximum) {
-      current = current ? `${current} ${sentence}` : sentence;
-    } else {
-      chunks.push(current);
-      current = sentence;
-    }
-  }
-  if (current) chunks.push(current);
-  return chunks.filter(Boolean);
-}
-
-async function fitToQuota(translator: Translator, text: string) {
-  const pending = roughChunks(text);
-  const fitted: string[] = [];
-
-  while (pending.length > 0) {
-    const chunk = pending.shift();
-    if (!chunk) continue;
-
-    const usage = await translator.measureInputUsage(chunk);
-    if (usage <= translator.inputQuota * 0.85 || chunk.length < 200) {
-      fitted.push(chunk);
-      continue;
-    }
-
-    const midpoint = Math.floor(chunk.length / 2);
-    const breakAt = Math.max(
-      chunk.lastIndexOf(" ", midpoint),
-      chunk.lastIndexOf("\n", midpoint),
-    );
-    const splitAt = breakAt > 50 ? breakAt : midpoint;
-    pending.unshift(chunk.slice(splitAt).trim());
-    pending.unshift(chunk.slice(0, splitAt).trim());
-  }
-
-  return fitted;
-}
-
 function extractNumbers(text: string) {
   return text.match(/\p{N}+(?:[.,]\p{N}+)*/gu) ?? [];
 }
 
-function languageApiError(error: unknown) {
-  if (error instanceof DOMException) {
-    if (error.name === "NotAllowedError") {
-      return new Error(
-        "The browser blocked its translation model. Open Verta directly in a desktop Chrome tab and try again.",
-      );
-    }
-    if (error.name === "QuotaExceededError") {
-      return new Error(
-        "This section is too large for the browser model. Try a smaller file.",
-      );
-    }
-  }
-
-  if (error instanceof Error && error.message) return error;
-  return new Error("The offline translation model could not finish this file.");
-}
+export type PairStatus =
+  | "checking"
+  | "available"
+  | "downloadable"
+  | "unavailable"
+  | "unsupported";
 
 export async function getPairAvailability(
   sourceCode: string,
   targetCode: string,
-) {
-  if (sourceCode === targetCode) return "available" as Availability;
-  const pair = compactPair(sourceCode, targetCode);
-  if (pair) {
-    if (!supportsCompactTranslation()) return "unsupported" as const;
-    return (await isModelCached(pair)) ? "available" as const : "downloadable" as const;
-  }
-  if (typeof Translator === "undefined") return "unsupported" as const;
+): Promise<Exclude<PairStatus, "checking">> {
+  const plan = translationPlan(sourceCode, targetCode);
+  if (!plan) return "unavailable";
+  if (plan.length === 0) return "available";
+  if (!supportsCompactTranslation()) return "unsupported";
+  return (await isPlanCached(plan)) ? "available" : "downloadable";
+}
 
+function languageName(code: string) {
   try {
-    return await Translator.availability({
-      sourceLanguage: sourceCode,
-      targetLanguage: targetCode,
-    });
+    return new Intl.DisplayNames(["en"], { type: "language" }).of(code === "iw" ? "he" : code) ?? code;
   } catch {
-    return "unavailable" as Availability;
+    return code;
   }
+}
+
+function modelLabel(stage: Stage) {
+  return stage.model.family === "nllb" ? "NLLB-200 (600M, 8-bit)" : "OPUS-MT (8-bit)";
 }
 
 export async function translateFile({
@@ -513,178 +451,131 @@ export async function translateFile({
   validateFile(file);
   abortIfNeeded(signal);
 
-  const pair = compactPair(options.sourceCode, options.targetCode);
-  const sameLanguage = options.sourceCode === options.targetCode;
-  if (!pair && !sameLanguage && typeof Translator === "undefined") {
-    throw new Error(
-      "This language pair needs a browser with the Translator API. English ↔ Arabic uses Verta's compact model and works without that API.",
-    );
+  const plan = translationPlan(options.sourceCode, options.targetCode);
+  if (!plan) {
+    throw new Error(`No local model covers ${options.sourceLanguage} → ${options.targetLanguage}.`);
+  }
+  if (plan.length > 0 && !supportsCompactTranslation()) {
+    throw new Error("This browser needs WebAssembly and Web Workers for local translation.");
   }
 
-  let browserTranslator: Translator | undefined;
-  let translator: { translate: (text: string, options?: { signal: AbortSignal }) => Promise<string>; destroy: () => void } | undefined;
+  // Read the whole file first so OCR/PDF workers are finished and terminated
+  // before any model allocates memory.
+  const extracted = await extractDocument(
+    file,
+    options.sourceCode,
+    signal,
+    onProgress,
+  );
+  if (plan.length > 0 && !navigator.onLine && !(await isPlanCached(plan))) {
+    throw new Error("This translation model is not fully cached. Connect once and complete a translation in this direction before using it offline.");
+  }
 
-  try {
-    // Chrome requires user activation, so create its translator before extraction.
-    if (!pair && !sameLanguage) {
-      const availability = await Translator.availability({
-        sourceLanguage: options.sourceCode,
-        targetLanguage: options.targetCode,
-      });
+  const glossary = parseGlossary(options.glossary);
+  const terminology: TranslationResult["terminology"] = glossary.map((entry) => ({
+    source: entry.source,
+    chosen: entry.target,
+    rationale: "Preferred term supplied by the user.",
+  }));
 
-      if (availability === "unavailable") {
-        throw new Error(
-          "This language pair is not available in the browser's offline model.",
-        );
-      }
-      if (availability === "downloadable" && !navigator.onLine) {
-        throw new Error(
-          "This language pack has not been downloaded yet. Connect once, run this translation, and the pair will work offline afterward.",
-        );
-      }
+  // Glossary source terms travel through the same stages as the document, so
+  // each term's automatic translation can be swapped for the preferred one.
+  let texts = [
+    ...glossary.map((entry) => entry.source),
+    ...extracted.sections.map((section) => section.content),
+  ];
 
-      browserTranslator = await Translator.create({
-        sourceLanguage: options.sourceCode,
-        targetLanguage: options.targetCode,
-        signal,
-        monitor(monitor) {
-          monitor.addEventListener("downloadprogress", (event) => {
-            onProgress({
-              progress: 30 + Math.round(event.loaded * 20),
-              message: "Downloading this language pack once",
-            });
-          });
-        },
-      });
-      translator = browserTranslator;
-    }
-
-    const extracted = await extractDocument(
-      file,
-      options.sourceCode,
-      signal,
-      onProgress,
-    );
-    if (pair) {
-      // Finish and terminate OCR/PDF workers before allocating model memory.
-      if (!navigator.onLine && !(await isModelCached(pair))) {
-        throw new Error("This compact model is not fully cached. Connect once and complete a translation in this direction before using it offline.");
-      }
-      onProgress({ progress: 30, message: "Loading the compact English–Arabic model" });
-      translator = await createCompactTranslator(pair, signal, (message) => {
-        onProgress({ progress: 35, message });
-      });
-    }
-    const glossary = parseGlossary(options.glossary);
-    const terminology: TranslationResult["terminology"] = [];
-    const automaticTerms = new Map<string, string>();
-
-    if (translator) {
-      for (const entry of glossary) {
+  for (let stageIndex = 0; stageIndex < plan.length; stageIndex += 1) {
+    abortIfNeeded(signal);
+    const stage = plan[stageIndex];
+    const step = plan.length > 1 ? ` (step ${stageIndex + 1} of ${plan.length})` : "";
+    const span = 60 / plan.length;
+    const base = 35 + span * stageIndex;
+    onProgress({
+      progress: Math.round(base),
+      message: `Loading the ${languageName(stage.source)} → ${languageName(stage.target)} model${step}`,
+    });
+    // Only one model is resident at a time; each worker is terminated before
+    // the next stage loads.
+    const translator = await createCompactTranslator(stage, signal, (message) => {
+      onProgress({ progress: Math.round(base), message: `${message}${step}` });
+    });
+    try {
+      const output: string[] = [];
+      for (let index = 0; index < texts.length; index += 1) {
         abortIfNeeded(signal);
-        automaticTerms.set(
-          entry.source,
-          await translator.translate(entry.source, { signal }),
-        );
-        terminology.push({
-          source: entry.source,
-          chosen: entry.target,
-          rationale: "Preferred term supplied by the user.",
+        onProgress({
+          progress: Math.round(base + span * ((index + 1) / texts.length)),
+          message: `Translating section ${index + 1} of ${texts.length}${step}`,
         });
+        output.push(await translator.translate(texts[index]));
       }
-    } else {
-      for (const entry of glossary) {
-        terminology.push({
-          source: entry.source,
-          chosen: entry.target,
-          rationale: "Preferred term supplied by the user.",
-        });
-      }
+      texts = output;
+    } finally {
+      translator.destroy();
     }
-
-    const translatedSections: TranslationSection[] = [];
-
-    for (let index = 0; index < extracted.sections.length; index += 1) {
-      abortIfNeeded(signal);
-      const section = extracted.sections[index];
-      onProgress({
-        progress:
-          45 +
-          Math.round(((index + 1) / extracted.sections.length) * 48),
-        message: `Translating section ${index + 1} of ${extracted.sections.length}`,
-      });
-
-      let content = section.content;
-      if (translator) {
-        // The compact worker splits by its actual tokenizer and rejects output
-        // truncation; Chrome's own model has a separate input quota.
-        const chunks = browserTranslator ? await fitToQuota(browserTranslator, content) : [content];
-        const translatedChunks: string[] = [];
-        for (const chunk of chunks) {
-          abortIfNeeded(signal);
-          translatedChunks.push(
-            await translator.translate(chunk, { signal }),
-          );
-        }
-        content = translatedChunks.join(" ");
-      }
-
-      for (const entry of glossary) {
-        const automatic =
-          automaticTerms.get(entry.source) ??
-          (options.sourceCode === options.targetCode ? entry.source : "");
-        content = replaceTerm(content, automatic, entry.target);
-      }
-
-      translatedSections.push({ ...section, content });
-    }
-
-    const translatedText = translatedSections
-      .map((section) => section.content)
-      .join("\n\n");
-    const sourceNumbers = extractNumbers(extracted.plainText);
-    const translatedNumbers = extractNumbers(translatedText);
-    const reviewFlags: string[] = [];
-
-    if (sourceNumbers.length !== translatedNumbers.length) {
-      reviewFlags.push(
-        `The source has ${sourceNumbers.length} numeric items and the result has ${translatedNumbers.length}; compare dates, amounts, and identifiers.`,
-      );
-    }
-    if (extracted.usedOcr) {
-      reviewFlags.push(
-        "Image text was read with local OCR. Check names, small print, and low-contrast areas.",
-      );
-    }
-    reviewFlags.push(
-      "This keyless mode does not perform a cloud semantic review; important legal, medical, or financial text needs human review.",
-    );
-
-    onProgress({ progress: 100, message: "Offline translation complete" });
-
-    return {
-      sourceLanguage: options.sourceLanguage,
-      targetLanguage: options.targetLanguage,
-      documentType: extracted.documentType,
-      title:
-        translatedSections.find((section) => section.kind === "title")
-          ?.content ?? titleFromFilename(file.name),
-      sections: translatedSections,
-      qualitySummary: `${sameLanguage ? "Source text retained without translation." : pair ? "Translated on this device with the compact OPUS-MT model (8-bit)." : "Translated on this device with the browser's language pack."} Section order was preserved, preferred terminology replacements were applied, and numeric item counts were compared.`,
-      translationNotes: [
-        "No file, key, or translation text was sent to Verta or a cloud API.",
-        "Offline mode favors privacy and cost over advanced context rewriting.",
-        ...(pair ? ["English–Arabic translation uses a small sentence-level model. It does not reason over the entire document; glossary replacement is best-effort."] : []),
-      ],
-      terminology,
-      reviewFlags,
-      confidence: reviewFlags.length > 1 ? "low" : "medium",
-    } satisfies TranslationResult;
-  } catch (error) {
-    throw languageApiError(error);
-  } finally {
-    translator?.destroy();
   }
+
+  const automaticTerms = texts.slice(0, glossary.length);
+  const translatedSections = extracted.sections.map((section, index) => {
+    let content = texts[glossary.length + index];
+    glossary.forEach((entry, termIndex) => {
+      const automatic = plan.length > 0 ? automaticTerms[termIndex] : entry.source;
+      content = replaceTerm(content, automatic, entry.target);
+    });
+    return { ...section, content };
+  });
+
+  const translatedText = translatedSections
+    .map((section) => section.content)
+    .join("\n\n");
+  const sourceNumbers = extractNumbers(extracted.plainText);
+  const translatedNumbers = extractNumbers(translatedText);
+  const reviewFlags: string[] = [];
+
+  if (sourceNumbers.length !== translatedNumbers.length) {
+    reviewFlags.push(
+      `The source has ${sourceNumbers.length} numeric items and the result has ${translatedNumbers.length}; compare dates, amounts, and identifiers. Small numbers are sometimes written out as words.`,
+    );
+  }
+  if (extracted.usedOcr) {
+    reviewFlags.push(
+      "Image text was read with local OCR. Check names, small print, and low-contrast areas.",
+    );
+  }
+  reviewFlags.push(
+    "This keyless mode does not perform a cloud semantic review; important legal, medical, or financial text needs human review.",
+  );
+
+  onProgress({ progress: 100, message: "Offline translation complete" });
+
+  const route =
+    plan.length === 0
+      ? "Source text retained without translation."
+      : plan.length === 2
+        ? `Translated on this device with two ${modelLabel(plan[0])} models through English (${options.sourceLanguage} → English → ${options.targetLanguage}).`
+        : `Translated on this device with ${modelLabel(plan[0])}.`;
+
+  return {
+    sourceLanguage: options.sourceLanguage,
+    targetLanguage: options.targetLanguage,
+    documentType: extracted.documentType,
+    title:
+      translatedSections.find((section) => section.kind === "title")
+        ?.content ?? titleFromFilename(file.name),
+    sections: translatedSections,
+    qualitySummary: `${route} Section order was preserved, preferred terminology replacements were applied, and numeric item counts were compared.`,
+    translationNotes: [
+      "No file, key, or translation text was sent to Verta or a cloud API.",
+      "Offline mode favors privacy and cost over advanced context rewriting.",
+      ...(plan.length > 0 ? ["Small open-weight models translate one sentence at a time. They do not reason over the entire document; glossary replacement is best-effort."] : []),
+      ...(plan.length === 2 ? ["No direct small model exists for this pair, so the text was translated into English and then into the target language. Some nuance can be lost in the intermediate step."] : []),
+      ...(plan.some((stage) => stage.model.family === "nllb") ? ["NLLB-200 is released under CC-BY-NC-4.0 (non-commercial use)."] : []),
+    ],
+    terminology,
+    reviewFlags,
+    confidence: reviewFlags.length > 1 ? "low" : "medium",
+  } satisfies TranslationResult;
 }
 
 export function getFullTranslation(result: TranslationResult) {

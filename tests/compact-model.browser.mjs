@@ -60,9 +60,14 @@ const memoryTimer = setInterval(async () => {
   finally { sampling = false; }
 }, 500);
 
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
+
 function assertEveryNumber(output, count, label) {
-  // Accept Arabic-Indic and Persian digits as well as Latin digits.
-  const latin = output.replace(/[٠-٩۰-۹]/gu, (digit) => String((digit.codePointAt(0) & 0xf)));
+  // Accept Arabic-Indic and Persian digits, and small numbers written as English
+  // words ("Bill number one"), as well as Latin digits.
+  const latin = output
+    .replace(/[٠-٩۰-۹]/gu, (digit) => String((digit.codePointAt(0) & 0xf)))
+    .replace(new RegExp(`\\b(${NUMBER_WORDS.join('|')})\\b`, 'giu'), (word) => String(NUMBER_WORDS.indexOf(word.toLowerCase())));
   const found = new Set((latin.match(/\d+/gu) ?? []).map(Number));
   const missing = Array.from({ length: count }, (_, i) => i + 1).filter((n) => !found.has(n));
   assert.deepEqual(missing, [], `${label}: sentences missing from the translation`);
@@ -84,15 +89,30 @@ async function translate(name, source, target, text, expectedScript) {
 }
 
 try {
+  // Remove any built-in browser translation API: Verta must not depend on it.
+  await context.addInitScript(() => {
+    Reflect.deleteProperty(globalThis, 'Translator');
+    Reflect.deleteProperty(globalThis, 'LanguageDetector');
+  });
   await page.goto(url);
   await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
   await translate('meeting.txt', 'English', 'Arabic', 'The meeting is tomorrow at ten in the morning.', /[\u0600-\u06ff]/u);
   await translate('arabic.txt', 'Arabic', 'English', 'هذا البرنامج يترجم المستندات على جهازك دون إرسالها إلى الإنترنت.', /[A-Za-z]/u);
+  // The other routes: a direct small model, two small models through English,
+  // and the NLLB-200 fallback. None of them may use a browser translator API.
+  assert.equal(await page.evaluate(() => typeof globalThis.Translator), 'undefined');
+  await translate('en-fr.txt', 'English', 'French', 'The meeting is tomorrow at ten in the morning.', /[A-Za-zÀ-ÿ]/u);
+  assert.notEqual(samples.at(-1).output.trim(), samples.at(-1).input);
+  await translate('fr-de.txt', 'French', 'German', 'Merci beaucoup pour votre aide.', /[A-Za-zÄÖÜäöüß]/u);
+  assert.notEqual(samples.at(-1).output.trim(), samples.at(-1).input);
+  await translate('en-ja.txt', 'English', 'Japanese', 'Thank you for your help.', /[぀-ヿ一-鿿]/u);
   // A fresh worker and a reloaded page must both work without network access.
   await context.setOffline(true);
   await page.reload();
   await translate('offline-en.txt', 'English', 'Arabic', 'Thank you for your help.', /[\u0600-\u06ff]/u);
   await translate('offline-ar.txt', 'Arabic', 'English', 'شكرا على مساعدتك.', /[A-Za-z]/u);
+  await translate('offline-en-ja.txt', 'English', 'Japanese', 'The meeting is tomorrow.', /[぀-ヿ一-鿿]/u);
+  await translate('offline-fr-de.txt', 'French', 'German', 'La réunion est demain.', /[A-Za-zÄÖÜäöüß]/u);
   // Numbered sentences prove completeness: an omitted sentence loses its number.
   // (A length check passed while 14 of 40 repeated sentences were dropped.)
   await translate('long.txt', 'English', 'Arabic', Array.from({ length: 40 }, (_, i) => `Invoice number ${i + 1} was paid on time.`).join(' '), /[\u0600-\u06ff]/u);

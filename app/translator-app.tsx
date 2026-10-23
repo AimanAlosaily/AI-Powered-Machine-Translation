@@ -34,54 +34,19 @@ import {
   useSyncExternalStore,
 } from "react";
 import {
-  compactPair,
   getFileExtension,
   getFullTranslation,
   getPairAvailability,
   MAX_FILE_SIZE,
+  type PairStatus,
+  planSizeMB,
   translateFile,
   TranslationResult,
+  translationPlan,
   validateFile,
 } from "./translation";
+import { LANGUAGES } from "./languages";
 
-const LANGUAGES = [
-  ["Arabic", "ar"],
-  ["English", "en"],
-  ["French", "fr"],
-  ["Spanish", "es"],
-  ["German", "de"],
-  ["Italian", "it"],
-  ["Portuguese", "pt"],
-  ["Chinese (Simplified)", "zh"],
-  ["Chinese (Traditional)", "zh-Hant"],
-  ["Japanese", "ja"],
-  ["Korean", "ko"],
-  ["Hindi", "hi"],
-  ["Turkish", "tr"],
-  ["Russian", "ru"],
-  ["Ukrainian", "uk"],
-  ["Dutch", "nl"],
-  ["Polish", "pl"],
-  ["Swedish", "sv"],
-  ["Norwegian", "no"],
-  ["Danish", "da"],
-  ["Finnish", "fi"],
-  ["Greek", "el"],
-  ["Hebrew", "iw"],
-  ["Indonesian", "id"],
-  ["Thai", "th"],
-  ["Vietnamese", "vi"],
-  ["Bulgarian", "bg"],
-  ["Bengali", "bn"],
-  ["Czech", "cs"],
-  ["Croatian", "hr"],
-  ["Hungarian", "hu"],
-  ["Romanian", "ro"],
-  ["Slovak", "sk"],
-  ["Slovenian", "sl"],
-  ["Tamil", "ta"],
-  ["Telugu", "te"],
-] as const;
 
 const RTL_CODES = new Set(["ar", "iw"]);
 const ACCEPTED_FILES =
@@ -89,10 +54,7 @@ const ACCEPTED_FILES =
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 type Phase = "idle" | "reading" | "translating" | "done" | "error";
-type PairStatus =
-  | Availability
-  | "checking"
-  | "unsupported";
+type Plan = ReturnType<typeof translationPlan>;
 
 type InstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -124,48 +86,36 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-function statusCopy(status: PairStatus, online: boolean, compact: boolean) {
-  if (compact) {
-    if (status === "unsupported") return { title: "Local model unavailable", detail: "Use a browser with WebAssembly and Web Workers." };
-    if (status === "available") return { title: "Compact model cached", detail: "English ↔ Arabic runs locally. No GPU or API key needed." };
-    if (status === "checking") return { title: "Checking compact model", detail: "Checking this direction’s saved model files." };
-    return { title: online ? "Compact model · about 114 MB" : "Connect once to download this model", detail: "English ↔ Arabic uses OPUS-MT. Each direction downloads separately." };
+function routeDetail(plan: Plan) {
+  if (!plan || plan.length === 0) return "";
+  if (plan.length === 2) {
+    return "No direct small model exists for this pair, so Verta chains two OPUS-MT models through English, one at a time.";
+  }
+  if (plan[0].model.family === "nllb") {
+    return "Uses NLLB-200, a larger multilingual model. On a 6 GB device, close other heavy tabs first.";
+  }
+  return "Uses a small OPUS-MT model for this direction.";
+}
+
+function statusCopy(status: PairStatus, online: boolean, plan: Plan) {
+  if (plan && plan.length === 0) {
+    return { title: "Same language", detail: "Verta extracts the text without translating it." };
   }
   if (status === "unsupported") {
-    return {
-      title: "Desktop Chrome 138+ required",
-      detail: "This pair needs Chrome’s Translator API. English ↔ Arabic also works with Verta’s compact model.",
-    };
+    return { title: "Local model unavailable", detail: "Use a current browser with WebAssembly and Web Workers." };
   }
-  if (status === "unavailable") {
-    return {
-      title: "Pair unavailable",
-      detail: "Choose another source and target language combination.",
-    };
+  if (status === "unavailable" || !plan) {
+    return { title: "Pair unavailable", detail: "No local model covers this combination. Choose another pair." };
+  }
+  if (status === "checking") {
+    return { title: "Checking saved models", detail: "Looking for this pair’s model files on this device." };
   }
   if (status === "available") {
-    return {
-      title: "Language pair ready offline",
-      detail: "The browser already has everything needed for this pair.",
-    };
-  }
-  if (status === "downloading") {
-    return {
-      title: "Language pack is downloading",
-      detail: "Keep this tab open until the one-time setup finishes.",
-    };
-  }
-  if (status === "downloadable") {
-    return {
-      title: online ? "One-time language download needed" : "Go online once",
-      detail: online
-        ? "Your first translation downloads this pair; later use works offline."
-        : "This pair has not been prepared on this device yet.",
-    };
+    return { title: "Ready offline", detail: `${routeDetail(plan)} Runs on this device; no GPU or API key needed.` };
   }
   return {
-    title: "Checking this device",
-    detail: "Looking for a compatible on-device translation model.",
+    title: online ? `One-time download · about ${planSizeMB(plan)} MB` : "Connect once to download this model",
+    detail: `${routeDetail(plan)} Later translations in this direction work offline.`,
   };
 }
 
@@ -220,7 +170,8 @@ export function TranslatorApp() {
     () => (result ? getFullTranslation(result) : ""),
     [result],
   );
-  const engineCopy = statusCopy(pairStatus, isOnline, Boolean(compactPair(sourceCode, targetCode)));
+  const plan = useMemo(() => translationPlan(sourceCode, targetCode), [sourceCode, targetCode]);
+  const engineCopy = statusCopy(pairStatus, isOnline, plan);
 
   useEffect(() => {
     const handleInstallPrompt = (event: Event) => {
@@ -320,7 +271,7 @@ export function TranslatorApp() {
           setProgress((previous) => Math.max(previous, update.progress));
           setProgressMessage(update.message);
           setPhase(
-            /translat|language pack/i.test(update.message)
+            /translat/i.test(update.message)
               ? "translating"
               : "reading",
           );
@@ -489,8 +440,8 @@ export function TranslatorApp() {
             <span>Nothing out.</span>
           </h1>
           <p className="hero-lede">
-            Translate English and Arabic on your device with a compact model,
-            even without a dedicated GPU. No account, API key, or file upload.
+            Translate documents between 35 languages with small open-weight
+            models that run on your CPU. No account, API key, or file upload.
           </p>
 
           <div className="proof-strip">
@@ -500,7 +451,7 @@ export function TranslatorApp() {
             </div>
             <div>
               <strong>02</strong>
-              <span>Compact local model</span>
+              <span>Open-weight models</span>
             </div>
             <div>
               <strong>03</strong>
@@ -717,10 +668,9 @@ export function TranslatorApp() {
           )}
 
           <p className="consent-note">
-            Nothing is uploaded. English ↔ Arabic downloads a small open-weight
-            model once per direction; keep site data to reuse it offline. Other
-            languages use supported browsers’ language packs. Image OCR supports
-            English and Arabic.
+            Nothing is uploaded. Each direction downloads its open-weight model
+            once from Hugging Face; keep site data to reuse it offline. Image OCR
+            supports English and Arabic.
           </p>
         </form>
       </section>
@@ -753,8 +703,8 @@ export function TranslatorApp() {
             <Languages size={24} aria-hidden="true" />
             <h3>A small local model</h3>
             <p>
-              English ↔ Arabic runs on the CPU with one compact model loaded
-              at a time. Its memory is released when the translation ends.
+              Every pair runs on the CPU with one model loaded at a time, one
+              sentence at a time. Its memory is released when the work ends.
             </p>
           </article>
           <article className="method-card">

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { splitToTokenBudget, splitSentences, assertCompleteGeneration, MAX_NEW_TOKENS } from "../app/local-translation/chunks";
-import { compactPair, isModelCached, modelFileUrls } from "../app/local-translation/models";
+import { isModelCached, modelFileUrls, planSizeMB, translationPlan } from "../app/local-translation/models";
+import { LANGUAGES } from "../app/languages";
 import { createCompactTranslator } from "../app/local-translation/client";
 import { getPairAvailability, translateFile } from "../app/translation";
 
@@ -45,12 +46,40 @@ test("output cap is an error even when Marian would force an EOS token", () => {
   assert.throws(() => splitToTokenBudget("a", () => 500, 192), /exceeds/);
 });
 
-test("only the intended pairs select compact models", () => {
-  assert.equal(compactPair("en", "ar"), "en-ar");
-  assert.equal(compactPair("ar", "en"), "ar-en");
-  assert.equal(compactPair("en", "fr"), null);
-  assert.equal(compactPair("ar", "ar"), null);
-  assert.ok(modelFileUrls("en-ar").every((url) => !url.includes("/main/")));
+const route = (source: string, target: string) => translationPlan(source, target)!.map((stage) =>
+  [stage.model.id.replace("Xenova/", ""), stage.prefix.trim(), stage.nllb ? `${stage.nllb.source}>${stage.nllb.target}` : ""]
+    .filter(Boolean).join(" "));
+
+test("routing prefers a direct small model, then two through English, then NLLB", () => {
+  assert.deepEqual(route("en", "ar"), ["opus-mt-en-ar >>ara<<"]);
+  assert.deepEqual(route("ar", "en"), ["opus-mt-ar-en"]);
+  assert.deepEqual(route("en", "fr"), ["opus-mt-en-fr"]);
+  assert.deepEqual(route("en", "zh"), ["opus-mt-en-zh >>cmn_Hans<<"]);
+  assert.deepEqual(route("en", "zh-Hant"), ["opus-mt-en-zh >>cmn_Hant<<"]);
+  assert.deepEqual(route("en", "vi"), ["opus-mt-en-vi >>vie<<"]);
+  assert.deepEqual(route("fr", "de"), ["opus-mt-fr-en", "opus-mt-en-de"]);
+  assert.deepEqual(route("ja", "ar"), ["opus-mt-ja-en", "opus-mt-en-ar >>ara<<"]);
+  assert.deepEqual(route("en", "ja"), ["nllb-200-distilled-600M eng_Latn>jpn_Jpan"]);
+  assert.deepEqual(route("ar", "ja"), ["nllb-200-distilled-600M arb_Arab>jpn_Jpan"]);
+  assert.deepEqual(route("pt", "fr"), ["nllb-200-distilled-600M por_Latn>fra_Latn"]);
+  assert.deepEqual(route("iw", "en"), ["nllb-200-distilled-600M heb_Hebr>eng_Latn"]);
+  assert.deepEqual(translationPlan("ar", "ar"), []);
+  assert.equal(translationPlan("en", "xx"), null);
+  assert.equal(planSizeMB(translationPlan("fr", "de")!), 214);
+});
+
+test("every language pair offered in the app has a pinned local route", () => {
+  for (const [, source] of LANGUAGES) {
+    for (const [, target] of LANGUAGES) {
+      const plan = translationPlan(source, target);
+      assert.ok(plan, `${source} → ${target} has no route`);
+      assert.ok(plan.length <= 2);
+      for (const stage of plan) {
+        assert.match(stage.model.revision, /^[0-9a-f]{40}$/);
+        assert.ok(modelFileUrls(stage.model).every((url) => url.includes(stage.model.revision)));
+      }
+    }
+  }
 });
 
 const originals = new Map<string, PropertyDescriptor | undefined>();
@@ -88,22 +117,22 @@ test("abort during download terminates the worker and permits a fresh job", asyn
   setGlobal("Worker", FakeWorker);
   FakeWorker.deferInit = true;
   const controller = new AbortController();
-  const pending = createCompactTranslator("en-ar", controller.signal, () => {});
+  const pending = createCompactTranslator(translationPlan("en", "ar")![0], controller.signal, () => {});
   const first = FakeWorker.instances.at(-1)!;
   controller.abort();
   await assert.rejects(pending, { name: "AbortError" });
   assert.equal(first.terminated, true);
   FakeWorker.deferInit = false;
-  const translator = await createCompactTranslator("ar-en", new AbortController().signal, () => {});
+  const translator = await createCompactTranslator(translationPlan("ar", "en")![0], new AbortController().signal, () => {});
   translator.destroy();
 });
 
 test("only one model can be resident; teardown terminates the worker", async () => {
   setGlobal("Worker", FakeWorker);
   const controller = new AbortController();
-  const translator = await createCompactTranslator("en-ar", controller.signal, () => {});
+  const translator = await createCompactTranslator(translationPlan("en", "ar")![0], controller.signal, () => {});
   try {
-    await assert.rejects(createCompactTranslator("ar-en", controller.signal, () => {}), /already running/);
+    await assert.rejects(createCompactTranslator(translationPlan("ar", "en")![0], controller.signal, () => {}), /already running/);
     assert.equal(await translator.translate("Hello world."), "مرحبا بالعالم.");
   } finally {
     translator.destroy();
@@ -112,25 +141,29 @@ test("only one model can be resident; teardown terminates the worker", async () 
 });
 
 test("cache readiness requires every pinned file and detects eviction", async () => {
-  let urls = modelFileUrls("en-ar");
+  const model = translationPlan("en", "ar")![0].model;
+  let urls = modelFileUrls(model);
   setGlobal("caches", {
     has: async () => true,
     open: async () => ({ keys: async () => urls.map((url) => new Request(url)) }),
   });
-  assert.equal(await isModelCached("en-ar"), true);
+  assert.equal(await isModelCached(model), true);
   urls = urls.slice(0, -1);
-  assert.equal(await isModelCached("en-ar"), false);
+  assert.equal(await isModelCached(model), false);
   setGlobal("caches", { has: async () => { throw new Error("Storage denied"); } });
-  assert.equal(await isModelCached("en-ar"), false);
+  assert.equal(await isModelCached(model), false);
 });
 
-test("English-Arabic works without Chrome Translator; other pairs remain explicit", async () => {
+test("every pair translates with local models and no browser Translator API", async () => {
   setGlobal("Worker", FakeWorker);
   setGlobal("Translator", undefined);
   setGlobal("caches", undefined);
   assert.equal(await getPairAvailability("en", "ar"), "downloadable");
-  assert.equal(await getPairAvailability("en", "fr"), "unsupported");
+  assert.equal(await getPairAvailability("en", "fr"), "downloadable");
+  assert.equal(await getPairAvailability("ja", "ko"), "downloadable");
+  assert.equal(await getPairAvailability("fr", "fr"), "available");
   setGlobal("navigator", { onLine: true });
+  const before = FakeWorker.instances.length;
   const result = await translateFile({
     file: new File(["Hello world."], "hello.txt"),
     options: { sourceCode: "en", sourceLanguage: "English", targetCode: "ar", targetLanguage: "Arabic", glossary: "" },
@@ -139,7 +172,22 @@ test("English-Arabic works without Chrome Translator; other pairs remain explici
   });
   assert.equal(result.sections[0].content, "مرحبا بالعالم.");
   assert.match(result.qualitySummary, /OPUS-MT/);
+  assert.equal(FakeWorker.instances.length, before + 1);
   assert.equal(FakeWorker.instances.at(-1)!.terminated, true);
+
+  // A pivot runs two stages, each in its own worker, never both at once.
+  const pivot = await translateFile({
+    file: new File(["Bonjour."], "bonjour.txt"),
+    options: { sourceCode: "fr", sourceLanguage: "French", targetCode: "de", targetLanguage: "German", glossary: "" },
+    signal: new AbortController().signal,
+    onProgress() {},
+  });
+  const [first, second] = FakeWorker.instances.slice(-2);
+  assert.equal(FakeWorker.instances.length, before + 3);
+  assert.ok(first.terminated && second.terminated);
+  const stages = [first, second].map((worker) => (worker.messages[0] as { stage: { model: { id: string } } }).stage.model.id);
+  assert.deepEqual(stages, ["Xenova/opus-mt-fr-en", "Xenova/opus-mt-en-de"]);
+  assert.match(pivot.qualitySummary, /through English/);
 });
 
 test("same-language extraction never requires or creates an AI model", async () => {
@@ -157,6 +205,7 @@ test("same-language extraction never requires or creates an AI model", async () 
 });
 
 test("uncached offline model fails clearly before starting a download", async () => {
+  setGlobal("Worker", FakeWorker);
   setGlobal("navigator", { onLine: false });
   setGlobal("caches", undefined);
   const count = FakeWorker.instances.length;

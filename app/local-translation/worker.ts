@@ -1,5 +1,5 @@
 import { env, AutoTokenizer, AutoModelForSeq2SeqLM, type PreTrainedTokenizer, type PreTrainedModel, type Tensor } from "@huggingface/transformers";
-import { COMPACT_MODELS, type CompactPair, type WorkerReply, type WorkerRequest } from "./models";
+import type { Stage, WorkerReply, WorkerRequest } from "./models";
 import { assertCompleteGeneration, MAX_NEW_TOKENS, splitSentences, splitToTokenBudget } from "./chunks";
 
 // This bundle is built for a dedicated browser worker, never the server.
@@ -16,19 +16,47 @@ env.backends.onnx.wasm!.wasmPaths = new URL("./", scope.location.href).href;
 env.backends.onnx.wasm!.numThreads = 1;
 env.backends.onnx.wasm!.proxy = false;
 
-let translator: { tokenizer: PreTrainedTokenizer; model: PreTrainedModel } | undefined;
-let activePair: CompactPair | undefined;
+type Encoded = Record<string, unknown> & { input_ids: Tensor };
+// Transformers.js 3.8.1 (pinned) builds NLLB inputs with this method: it puts
+// the source language token first and returns the target language token id.
+type NllbTokenizer = PreTrainedTokenizer & {
+  _build_translation_inputs(
+    text: string,
+    options: { padding: boolean; truncation: boolean },
+    kwargs: { src_lang: string; tgt_lang: string; forced_bos_token_id?: number },
+  ): Encoded;
+};
+
+let loaded: { tokenizer: PreTrainedTokenizer; model: PreTrainedModel; stage: Stage } | undefined;
 let busy = false;
 
+function encoder(current: NonNullable<typeof loaded>) {
+  const { tokenizer, stage } = current;
+  if (stage.nllb) {
+    const nllb = stage.nllb;
+    return (value: string) => {
+      const kwargs: { src_lang: string; tgt_lang: string; forced_bos_token_id?: number } = { src_lang: nllb.source, tgt_lang: nllb.target };
+      const inputs = (tokenizer as unknown as NllbTokenizer)._build_translation_inputs(value, { padding: false, truncation: false }, kwargs);
+      if (typeof kwargs.forced_bos_token_id !== "number") throw new Error("The model does not support this target language.");
+      return { inputs, extra: { forced_bos_token_id: kwargs.forced_bos_token_id } };
+    };
+  }
+  return (value: string) => ({
+    inputs: tokenizer(stage.prefix + value, { truncation: false, padding: false }) as unknown as Encoded,
+    extra: {},
+  });
+}
+
 async function translate(text: string, id: number) {
-  if (!translator || !activePair) throw new Error("The local model is not ready.");
-  const current = translator;
-  const prefix = COMPACT_MODELS[activePair].prefix;
-  const encode = (value: string) => current.tokenizer(prefix + value, { truncation: false, padding: false });
-  const countTokens = (value: string) => encode(value).input_ids.size;
+  if (!loaded) throw new Error("The local model is not ready.");
+  const current = loaded;
+  const encode = encoder(current);
+  const countTokens = (value: string) => encode(value).inputs.input_ids.size;
   const generate = async (chunk: string) => {
+    const { inputs, extra } = encode(chunk);
     const tokens = await current.model.generate({
-      ...encode(chunk),
+      ...inputs,
+      ...extra,
       max_new_tokens: MAX_NEW_TOKENS,
       num_beams: 1,
       do_sample: false,
@@ -85,10 +113,10 @@ scope.onmessage = async ({ data }) => {
   busy = true;
   try {
     if (data.type === "init") {
-      if (translator) throw new Error("A model is already loaded in this worker.");
-      const model = COMPACT_MODELS[data.pair];
+      if (loaded) throw new Error("A model is already loaded in this worker.");
+      const { model } = data.stage;
       const progress_callback = (progress: import("@huggingface/transformers").ProgressInfo) => {
-        let message = "Loading compact translation model";
+        let message = "Loading the translation model";
         if (progress.status === "progress") message = `Downloading model file: ${Math.round(progress.progress)}%`;
         scope.postMessage({ id: data.id, type: "progress", message });
       };
@@ -99,8 +127,7 @@ scope.onmessage = async ({ data }) => {
         device: "wasm",
         progress_callback,
       });
-      translator = { tokenizer, model: loadedModel };
-      activePair = data.pair;
+      loaded = { tokenizer, model: loadedModel, stage: data.stage };
       scope.postMessage({ id: data.id, type: "ready" });
     } else {
       scope.postMessage({ id: data.id, type: "result", text: await translate(data.text, data.id) });

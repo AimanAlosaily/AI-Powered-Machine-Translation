@@ -23,7 +23,9 @@ The **6 GB total system RAM target** is supported by a conservative configuratio
 - 8-bit model weights, CPU/WASM execution, and a single inference thread.
 - One translation worker/model at a time, released after completion or cancel.
 - OCR/PDF extraction finishes before the compact model loads.
-- One chunk at a time, at most 192 source tokens including the language prefix.
+- One sentence at a time, at most 192 source tokens including the language
+  prefix. These models are trained on sentence pairs and can drop sentences
+  when given a multi-sentence block, so Verta never sends one.
 - Greedy decoding (`num_beams: 1`) and a 384-token output limit.
 - An output-limit error is shown instead of silently accepting truncated text.
 
@@ -90,7 +92,12 @@ pnpm test
 NEXT_PUBLIC_STATIC_EXPORT=true pnpm run build:github
 ```
 
-The unit suite covers token-budget splitting without source loss, output-limit
+The `Verify Verta` GitHub Actions workflow runs these on every push, plus
+`pnpm run test:browser`: the real pinned models in Chromium, both directions,
+an offline reload, long numbered input that fails if any sentence is missing,
+and cancel-then-restart.
+
+The unit suite covers sentence and token-budget splitting without source loss, output-limit
 handling, worker cancellation and cleanup, one active model, cache eviction,
 engine routing, same-language extraction, and offline error handling. Unit
 worker doubles exercise the application contract; they do not measure model
