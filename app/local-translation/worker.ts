@@ -130,6 +130,15 @@ scope.onmessage = async ({ data }) => {
         dtype: "q8",
         device: "wasm",
         progress_callback,
+        // NLLB's weights are about 8x OPUS-MT's. Skip the runtime's pre-packed
+        // weight copies and its growing memory arena to lower peak RAM.
+        ...(model.family === "nllb" ? {
+          session_options: {
+            enableCpuMemArena: false,
+            enableMemPattern: false,
+            extra: { session: { disable_prepacking: "1" } },
+          },
+        } : {}),
       });
       loaded = { tokenizer, model: loadedModel, stage: data.stage };
       scope.postMessage({ id: data.id, type: "ready" });
