@@ -14,7 +14,7 @@ Implemented in branch `feat/compact-local-translation`.
 
 ## Pending / regression found
 
-The first browser offline reload test failed because the model files were cached but the translation worker script could be absent from the app cache. `public/sw.js` now explicitly precaches the translation worker and WASM runtime and uses `event.waitUntil` for cache writes. The complete browser regression test has been started but was not yet confirmed at this checkpoint.
+The first browser offline reload test failed because the model files were cached but the translation worker script could be absent from the app cache. `public/sw.js` now explicitly precaches the translation worker and WASM runtime and uses `event.waitUntil` for cache writes. The complete browser regression test initially timed out on an overly strict field-label selector before translation started. Those selectors have been corrected to `.field-grid select`, but the rerun remains pending.
 
 Re-run both directions online, then reload offline and test both directions, long text, cancellation followed by another job, and browser memory use. The repeatable test is `tests/compact-model.browser.mjs`.
 

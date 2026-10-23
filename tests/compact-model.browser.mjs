@@ -61,8 +61,8 @@ const memoryTimer = setInterval(async () => {
 }, 500);
 
 async function translate(name, source, target, text, expectedScript) {
-  await page.getByLabel('Source language', { exact: true }).selectOption(source);
-  await page.getByLabel('Target language', { exact: true }).selectOption(target);
+  await page.locator('.field-grid select').nth(0).selectOption(source);
+  await page.locator('.field-grid select').nth(1).selectOption(target);
   await page.locator('input[type=file]').setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.from(text) });
   const started = Date.now();
   await page.getByRole('button', { name: 'Translate on this device', exact: true }).click();

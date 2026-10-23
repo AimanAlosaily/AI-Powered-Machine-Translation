@@ -14,11 +14,15 @@ The user requested a very small open-weight translation component for a device w
 - Worker/runtime are bundled by `scripts/prepare-offline-assets.mjs` into ignored `public/offline/`; no weights are checked into git.
 - UI copy, status, cancellation race handling, README, tests, and lockfile have been updated.
 
+## GitHub push blocker
+
+The immediate push was attempted but did not reach GitHub: the GitHub integration returned HTTP 403 (`Resource not accessible by integration`) for the tree write, and Git CLI had no HTTPS credentials. The checkpoint is committed locally and exported as a ZIP with full source, a Git bundle, and a patch. Reauthorize repository write access, then push the checkpoint branch.
+
 ## Next action
 
-Read `docs/compact-model-validation.md` first. Finish the real browser/offline regression test before merging or deploying. A first test successfully translated online but failed offline because the worker script was missing from the service-worker cache. A fix now explicitly precaches the worker and WASM files; its full end-to-end rerun was still in progress when the user requested this checkpoint push.
+Read `docs/compact-model-validation.md` first. Finish the real browser/offline regression test before merging or deploying. A first test successfully translated online but failed offline because the worker script was missing from the service-worker cache. A fix now explicitly precaches the worker and WASM files; its full end-to-end rerun remains unconfirmed. The new regression test initially timed out on an overly strict field-label selector; those selectors have been changed to `.field-grid select` and still need rerunning.
 
-The source is on `feat/compact-local-translation`, based on the repository's original `main`. Do not assume these changes are merged or live.
+The source is committed locally on `feat/compact-local-translation`, based on the repository's original `main`. Do not assume these changes are merged or live.
 
 Use `pnpm run test:browser` after building the static export with the repository base path. The test exercises both directions, offline reload, long input, and cancellation/restart. It optionally samples total Chromium RSS on Linux; do not describe that as a real 6 GB device benchmark.
 
