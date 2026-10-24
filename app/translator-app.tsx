@@ -31,66 +31,33 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   getFileExtension,
   getFullTranslation,
   getPairAvailability,
+  isOfflineReady,
   MAX_FILE_SIZE,
+  OFFLINE_PACK_MB,
+  type PairStatus,
+  planSizeMB,
+  saveForOffline,
   translateFile,
   TranslationResult,
+  translationPlan,
   validateFile,
 } from "./translation";
+import { LANGUAGES } from "./languages";
 
-const LANGUAGES = [
-  ["Arabic", "ar"],
-  ["English", "en"],
-  ["French", "fr"],
-  ["Spanish", "es"],
-  ["German", "de"],
-  ["Italian", "it"],
-  ["Portuguese", "pt"],
-  ["Chinese (Simplified)", "zh"],
-  ["Chinese (Traditional)", "zh-Hant"],
-  ["Japanese", "ja"],
-  ["Korean", "ko"],
-  ["Hindi", "hi"],
-  ["Turkish", "tr"],
-  ["Russian", "ru"],
-  ["Ukrainian", "uk"],
-  ["Dutch", "nl"],
-  ["Polish", "pl"],
-  ["Swedish", "sv"],
-  ["Norwegian", "no"],
-  ["Danish", "da"],
-  ["Finnish", "fi"],
-  ["Greek", "el"],
-  ["Hebrew", "iw"],
-  ["Indonesian", "id"],
-  ["Thai", "th"],
-  ["Vietnamese", "vi"],
-  ["Bulgarian", "bg"],
-  ["Bengali", "bn"],
-  ["Czech", "cs"],
-  ["Croatian", "hr"],
-  ["Hungarian", "hu"],
-  ["Romanian", "ro"],
-  ["Slovak", "sk"],
-  ["Slovenian", "sl"],
-  ["Tamil", "ta"],
-  ["Telugu", "te"],
-] as const;
 
-const RTL_CODES = new Set(["ar", "iw"]);
+const RTL_CODES = new Set(["ar"]);
 const ACCEPTED_FILES =
   ".pdf,.docx,.rtf,.odt,.txt,.md,.csv,.pptx,.png,.jpg,.jpeg,.webp";
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 type Phase = "idle" | "reading" | "translating" | "done" | "error";
-type PairStatus =
-  | Availability
-  | "checking"
-  | "unsupported";
+type Plan = ReturnType<typeof translationPlan>;
 
 type InstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -122,42 +89,44 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-function statusCopy(status: PairStatus, online: boolean) {
-  if (status === "unsupported") {
-    return {
-      title: "Desktop Chrome 138+ required",
-      detail: "This browser does not expose an on-device translation model.",
-    };
+function statusCopy(status: PairStatus, online: boolean, plan: Plan) {
+  if (plan && plan.length === 0) {
+    return { title: "Same language", detail: "Verta extracts the text without translating it." };
   }
-  if (status === "unavailable") {
-    return {
-      title: "Pair unavailable",
-      detail: "Choose another source and target language combination.",
-    };
+  if (status === "unsupported") {
+    return { title: "Local model unavailable", detail: "Use a current browser with WebAssembly and Web Workers." };
+  }
+  if (status === "unavailable" || !plan) {
+    return { title: "Pair unavailable", detail: "Verta translates between Arabic and English." };
+  }
+  if (status === "checking") {
+    return { title: "Checking saved models", detail: "Looking for this pair’s model files on this device." };
   }
   if (status === "available") {
-    return {
-      title: "Language pair ready offline",
-      detail: "The browser already has everything needed for this pair.",
-    };
-  }
-  if (status === "downloading") {
-    return {
-      title: "Language pack is downloading",
-      detail: "Keep this tab open until the one-time setup finishes.",
-    };
-  }
-  if (status === "downloadable") {
-    return {
-      title: online ? "One-time language download needed" : "Go online once",
-      detail: online
-        ? "Your first translation downloads this pair; later use works offline."
-        : "This pair has not been prepared on this device yet.",
-    };
+    return { title: "Model ready offline", detail: "This direction’s open-weight model is saved on this device. No GPU or API key needed." };
   }
   return {
-    title: "Checking this device",
-    detail: "Looking for a compatible on-device translation model.",
+    title: online ? `One-time download · about ${planSizeMB(plan)} MB` : "Connect once to download this model",
+    detail: "Each direction downloads its small open-weight model once; after that it works offline.",
+  };
+}
+
+function subscribeOnline(notify: () => void) {
+  window.addEventListener("online", notify);
+  window.addEventListener("offline", notify);
+  return () => {
+    window.removeEventListener("online", notify);
+    window.removeEventListener("offline", notify);
+  };
+}
+
+function subscribeInstalled(notify: () => void) {
+  const media = window.matchMedia("(display-mode: standalone)");
+  media.addEventListener("change", notify);
+  window.addEventListener("appinstalled", notify);
+  return () => {
+    media.removeEventListener("change", notify);
+    window.removeEventListener("appinstalled", notify);
   };
 }
 
@@ -173,45 +142,43 @@ export function TranslatorApp() {
   const [result, setResult] = useState<TranslationResult | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [pairStatus, setPairStatus] = useState<PairStatus>("checking");
-  const [isOnline, setIsOnline] = useState(true);
+  const [pairState, setPairState] = useState<{ pair: string; status: PairStatus }>({ pair: "", status: "checking" });
+  const isOnline = useSyncExternalStore(subscribeOnline, () => navigator.onLine, () => true);
   const [installPrompt, setInstallPrompt] =
     useState<InstallPromptEvent | null>(null);
-  const [isInstalled, setIsInstalled] = useState(false);
+  const isInstalled = useSyncExternalStore(subscribeInstalled, () => window.matchMedia("(display-mode: standalone)").matches, () => false);
   const inputRef = useRef<HTMLInputElement>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  // "Save both directions" downloads both models ahead of time for offline use.
+  const [offlineReady, setOfflineReady] = useState<boolean | null>(null);
+  const [savingMessage, setSavingMessage] = useState("");
+  const [savedCount, setSavedCount] = useState(0);
+  const savingRef = useRef<AbortController | null>(null);
 
   const sourceCode =
     LANGUAGES.find(([name]) => name === sourceLanguage)?.[1] ?? "en";
   const targetCode =
     LANGUAGES.find(([name]) => name === targetLanguage)?.[1] ?? "ar";
+  const pairKey = `${sourceCode}-${targetCode}`;
+  const pairStatus = pairState.pair === pairKey ? pairState.status : "checking";
   const isRtl = RTL_CODES.has(targetCode);
   const isWorking = phase === "reading" || phase === "translating";
   const translationText = useMemo(
     () => (result ? getFullTranslation(result) : ""),
     [result],
   );
-  const engineCopy = statusCopy(pairStatus, isOnline);
+  const plan = useMemo(() => translationPlan(sourceCode, targetCode), [sourceCode, targetCode]);
+  const engineCopy = statusCopy(pairStatus, isOnline, plan);
 
   useEffect(() => {
-    setIsOnline(navigator.onLine);
-    setIsInstalled(
-      window.matchMedia("(display-mode: standalone)").matches,
-    );
-
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
     const handleInstallPrompt = (event: Event) => {
       event.preventDefault();
       setInstallPrompt(event as InstallPromptEvent);
     };
     const handleInstalled = () => {
       setInstallPrompt(null);
-      setIsInstalled(true);
     };
 
-    window.addEventListener("online", handleOnline);
-    window.addEventListener("offline", handleOffline);
     window.addEventListener("beforeinstallprompt", handleInstallPrompt);
     window.addEventListener("appinstalled", handleInstalled);
 
@@ -223,8 +190,6 @@ export function TranslatorApp() {
 
     return () => {
       controllerRef.current?.abort();
-      window.removeEventListener("online", handleOnline);
-      window.removeEventListener("offline", handleOffline);
       window.removeEventListener("beforeinstallprompt", handleInstallPrompt);
       window.removeEventListener("appinstalled", handleInstalled);
     };
@@ -232,14 +197,48 @@ export function TranslatorApp() {
 
   useEffect(() => {
     let active = true;
-    setPairStatus("checking");
     void getPairAvailability(sourceCode, targetCode).then((availability) => {
-      if (active) setPairStatus(availability);
+      if (active) setPairState({ pair: `${sourceCode}-${targetCode}`, status: availability });
     });
     return () => {
       active = false;
     };
-  }, [sourceCode, targetCode]);
+  }, [sourceCode, targetCode, isOnline, phase]);
+
+  useEffect(() => {
+    let active = true;
+    void isOfflineReady().then((ready) => {
+      if (active) setOfflineReady(ready);
+    });
+    return () => {
+      active = false;
+    };
+  }, [phase, savedCount]);
+
+  const saveOffline = async () => {
+    if (savingRef.current || controllerRef.current) return;
+    const controller = new AbortController();
+    savingRef.current = controller;
+    setError("");
+    setSavingMessage("Preparing offline download");
+    try {
+      await saveForOffline(controller.signal, (message) => {
+        if (savingRef.current === controller) setSavingMessage(message);
+      });
+    } catch (saveError) {
+      if (!(saveError instanceof DOMException && saveError.name === "AbortError")) {
+        setError(saveError instanceof Error ? saveError.message : "The models could not be saved for offline use.");
+      }
+    } finally {
+      if (savingRef.current === controller) savingRef.current = null;
+      setSavingMessage("");
+      setSavedCount((count) => count + 1);
+    }
+  };
+
+  const cancelSaving = () => {
+    savingRef.current?.abort();
+  };
 
   const chooseFile = (nextFile?: File) => {
     if (!nextFile) return;
@@ -273,6 +272,7 @@ export function TranslatorApp() {
 
   const handleTranslate = async (event: FormEvent) => {
     event.preventDefault();
+    if (controllerRef.current || savingRef.current) return;
     if (!file) {
       setError("Choose a document or image first.");
       setPhase("error");
@@ -299,18 +299,21 @@ export function TranslatorApp() {
         },
         signal: controller.signal,
         onProgress(update) {
-          setProgress(update.progress);
+          if (controllerRef.current !== controller || controller.signal.aborted) return;
+          setProgress((previous) => Math.max(previous, update.progress));
           setProgressMessage(update.message);
           setPhase(
-            /translat|language pack/i.test(update.message)
+            /translat/i.test(update.message)
               ? "translating"
               : "reading",
           );
         },
       });
+      if (controllerRef.current !== controller || controller.signal.aborted) return;
       setResult(nextResult);
       setPhase("done");
     } catch (translationError) {
+      if (controllerRef.current !== controller) return;
       if (
         translationError instanceof DOMException &&
         translationError.name === "AbortError"
@@ -325,17 +328,19 @@ export function TranslatorApp() {
       );
       setPhase("error");
     } finally {
-      controllerRef.current = null;
+      if (controllerRef.current === controller) controllerRef.current = null;
     }
   };
 
   const cancelTranslation = () => {
     controllerRef.current?.abort();
+    controllerRef.current = null;
     setPhase("idle");
   };
 
   const reset = () => {
     controllerRef.current?.abort();
+    controllerRef.current = null;
     setFile(null);
     setResult(null);
     setError("");
@@ -371,57 +376,62 @@ export function TranslatorApp() {
 
   const downloadDocx = async () => {
     if (!file || !result) return;
+    try {
+      const {
+        AlignmentType,
+        Document,
+        HeadingLevel,
+        Packer,
+        Paragraph,
+        TextRun,
+      } = await import("docx");
 
-    const {
-      AlignmentType,
-      Document,
-      HeadingLevel,
-      Packer,
-      Paragraph,
-      TextRun,
-    } = await import("docx");
-
-    const children = [
-      new Paragraph({
-        heading: HeadingLevel.TITLE,
-        alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
-        bidirectional: isRtl,
-        children: [new TextRun({ text: result.title, bold: true })],
-      }),
-      ...result.sections.map((section) => {
-        const heading =
-          section.kind === "title"
-            ? HeadingLevel.HEADING_1
-            : section.kind === "heading"
-              ? HeadingLevel.HEADING_2
-              : undefined;
-        return new Paragraph({
-          heading,
+      const children = [
+        new Paragraph({
+          heading: HeadingLevel.TITLE,
           alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
           bidirectional: isRtl,
-          spacing: { after: 180 },
-          children: [
-            new TextRun({
-              text: section.content,
-              bold: section.kind === "title" || section.kind === "heading",
-            }),
-          ],
-        });
-      }),
-    ];
+          children: [new TextRun({ text: result.title, bold: true })],
+        }),
+        ...result.sections.map((section) => {
+          const heading =
+            section.kind === "title"
+              ? HeadingLevel.HEADING_1
+              : section.kind === "heading"
+                ? HeadingLevel.HEADING_2
+                : undefined;
+          return new Paragraph({
+            heading,
+            alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
+            bidirectional: isRtl,
+            spacing: { after: 180 },
+            children: [
+              new TextRun({
+                text: section.content,
+                bold: section.kind === "title" || section.kind === "heading",
+              }),
+            ],
+          });
+        }),
+      ];
 
-    const document = new Document({
-      sections: [{ properties: {}, children }],
-      creator: "Verta Offline",
-      title: result.title,
-      description: `Translated offline into ${result.targetLanguage} with Verta`,
-    });
+      const document = new Document({
+        sections: [{ properties: {}, children }],
+        creator: "Verta Offline",
+        title: result.title,
+        description: `Translated offline into ${result.targetLanguage} with Verta`,
+      });
 
-    const blob = await Packer.toBlob(document);
-    downloadBlob(
-      blob,
-      `${safeFilename(file.name)}-${targetCode}-translated.docx`,
-    );
+      const blob = await Packer.toBlob(document);
+      downloadBlob(
+        blob,
+        `${safeFilename(file.name)}-${targetCode}-translated.docx`,
+      );
+    } catch {
+      // The Word exporter is loaded on demand; it can fail if this browser
+      // has not saved the app's files for offline use yet.
+      setError("The Word file could not be created. Connect to the internet once so Verta can finish saving its offline files, then try again, or download plain text.");
+    }
   };
 
   return (
@@ -467,9 +477,8 @@ export function TranslatorApp() {
             <span>Nothing out.</span>
           </h1>
           <p className="hero-lede">
-            Verta reads and translates on your device with the language model
-            already built into supported desktop browsers. No account, API key,
-            or file upload.
+            Translate Arabic and English documents with small open-weight
+            models that run on your CPU. No account, API key, or file upload.
           </p>
 
           <div className="proof-strip">
@@ -479,7 +488,7 @@ export function TranslatorApp() {
             </div>
             <div>
               <strong>02</strong>
-              <span>Browser language packs</span>
+              <span>Open-weight models</span>
             </div>
             <div>
               <strong>03</strong>
@@ -487,14 +496,14 @@ export function TranslatorApp() {
             </div>
           </div>
 
-          <div className="language-line" aria-label="Example languages">
+          <div className="language-line" aria-label="Arabic and English">
             <span>مرحباً</span>
             <i aria-hidden="true" />
-            <span>Bonjour</span>
+            <span>Hello</span>
             <i aria-hidden="true" />
-            <span>こんにちは</span>
+            <span>شكراً</span>
             <i aria-hidden="true" />
-            <span>Hola</span>
+            <span>Thank you</span>
           </div>
         </div>
 
@@ -515,6 +524,7 @@ export function TranslatorApp() {
             ref={inputRef}
             className="sr-only"
             type="file"
+            disabled={isWorking}
             accept={ACCEPTED_FILES}
             onChange={(event) => chooseFile(event.target.files?.[0])}
           />
@@ -584,6 +594,7 @@ export function TranslatorApp() {
             <label className="field">
               <span>Source language</span>
               <select
+                disabled={isWorking}
                 value={sourceLanguage}
                 onChange={(event) => setSourceLanguage(event.target.value)}
               >
@@ -597,6 +608,7 @@ export function TranslatorApp() {
             <label className="field">
               <span>Target language</span>
               <select
+                disabled={isWorking}
                 value={targetLanguage}
                 onChange={(event) => setTargetLanguage(event.target.value)}
               >
@@ -635,6 +647,42 @@ export function TranslatorApp() {
             </span>
           </div>
 
+          {offlineReady !== null && (
+            <div
+              className={`offline-pack${offlineReady ? " offline-pack-ready" : ""}`}
+              aria-live="polite"
+            >
+              {offlineReady ? (
+                <>
+                  <CheckCircle2 size={16} aria-hidden="true" />
+                  <span>Both directions are saved. Verta can translate with no internet.</span>
+                </>
+              ) : savingMessage ? (
+                <>
+                  <LoaderCircle className="spinner" size={16} aria-hidden="true" />
+                  <span>{savingMessage}</span>
+                  <button type="button" className="offline-pack-cancel" onClick={cancelSaving}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <DownloadCloud size={16} aria-hidden="true" />
+                  <span>
+                    {isOnline
+                      ? "Save English → Arabic and Arabic → English now to use Verta with no internet later."
+                      : "Connect once to save both directions for offline use."}
+                  </span>
+                  {isOnline && (
+                    <button type="button" onClick={saveOffline} disabled={isWorking}>
+                      Save both · {OFFLINE_PACK_MB} MB
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           <details className="context-panel">
             <summary>
               <ScanText size={17} aria-hidden="true" />
@@ -645,6 +693,7 @@ export function TranslatorApp() {
               <label className="field">
                 <span>Glossary</span>
                 <textarea
+                  disabled={isWorking}
                   value={glossary}
                   onChange={(event) => setGlossary(event.target.value)}
                   placeholder={"One term per line, for example:\nconsideration → المقابل"}
@@ -685,16 +734,20 @@ export function TranslatorApp() {
               </p>
             </div>
           ) : (
-            <button className="translate-button" type="submit">
+            <button
+              className="translate-button"
+              type="submit"
+              disabled={Boolean(savingMessage)}
+            >
               Translate on this device
               <ArrowRight size={19} aria-hidden="true" />
             </button>
           )}
 
           <p className="consent-note">
-            Nothing is uploaded. The first use of a language pair downloads a
-            browser-managed pack; that pair can then work without internet.
-            Image OCR is currently limited to English and Arabic source text.
+            Nothing is uploaded. Each direction downloads its open-weight model
+            (about 111 MB) once from Hugging Face; keep site data to reuse it
+            offline. Image OCR reads English and Arabic.
           </p>
         </form>
       </section>
@@ -725,10 +778,10 @@ export function TranslatorApp() {
           <article className="method-card">
             <span>02</span>
             <Languages size={24} aria-hidden="true" />
-            <h3>Built-in translation</h3>
+            <h3>A small local model</h3>
             <p>
-              Supported desktop browsers provide their own language packs. A
-              pair is downloaded once and stays on the device.
+              Arabic ↔ English runs on the CPU, one sentence at a time, with a
+              single 8-bit model loaded. Its memory is released when it ends.
             </p>
           </article>
           <article className="method-card">

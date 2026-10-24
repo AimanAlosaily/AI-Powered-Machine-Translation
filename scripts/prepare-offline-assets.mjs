@@ -2,6 +2,7 @@ import { cp, mkdir, writeFile } from "node:fs/promises";
 import { deflateSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const destination = join(projectRoot, "public", "offline");
@@ -10,6 +11,10 @@ const fromRoot = (...parts) => join(projectRoot, "node_modules", ...parts);
 await mkdir(join(destination, "tesseract-core"), { recursive: true });
 
 const assets = [
+  ...["ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm"].map((filename) => [
+    fromRoot("@huggingface", "transformers", "dist", filename),
+    join(destination, filename),
+  ]),
   [
     fromRoot("pdfjs-dist", "build", "pdf.worker.min.mjs"),
     join(destination, "pdf.worker.min.mjs"),
@@ -56,6 +61,19 @@ const assets = [
 for (const [source, target] of assets) {
   await cp(source, target);
 }
+
+// Use the same standalone worker with both Vite/Vinext and Next static export.
+// Runtime and WASM live beside it, so no runtime CDN is needed after setup.
+await build({
+  entryPoints: [join(projectRoot, "app", "local-translation", "worker.ts")],
+  outfile: join(destination, "translation-worker.js"),
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2022",
+  minify: true,
+  legalComments: "linked",
+});
 
 const crcTable = Array.from({ length: 256 }, (_, initial) => {
   let value = initial;

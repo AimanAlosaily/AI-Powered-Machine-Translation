@@ -1,0 +1,76 @@
+name: Verify Verta
+
+# Runs on every branch push and pull request. Deployment stays in
+# deploy-pages.yml and only runs for main.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Lint, unit tests, builds, typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint
+      # Unit tests, Vinext production build, and server-rendering tests.
+      - run: pnpm test
+      - name: Static export with the GitHub Pages base path
+        env:
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+          NEXT_PUBLIC_STATIC_EXPORT: "true"
+        run: pnpm run build:github
+      - run: pnpm run typecheck
+
+  browser:
+    name: Real models in Chromium (online, offline, long text, Word, cancel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Static export with the GitHub Pages base path
+        env:
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+          NEXT_PUBLIC_STATIC_EXPORT: "true"
+        run: pnpm run build:github
+      - run: pnpm exec playwright install --with-deps chromium
+      # Downloads both pinned OPUS-MT models (about 228 MB) from Hugging Face.
+      - name: Browser regression test
+        shell: bash
+        env:
+          TEST_BASE_PATH: /${{ github.event.repository.name }}
+        run: |
+          mkdir -p work
+          pnpm run test:browser 2>&1 | tee work/browser-test.log
+      - name: Upload screenshot and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test
+          path: work/
+          if-no-files-found: ignore
