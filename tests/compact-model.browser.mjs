@@ -152,6 +152,28 @@ try {
   const ocrText = await translate('notice.png', 'English', 'English', '[image]', /meeting/iu, notice);
   assert.match(ocrText, /contract/iu, 'OCR missed the second line');
   await translate('notice-ar.png', 'English', 'Arabic', ocrText, /[\u0600-\u06ff]/u, notice);
+  // Real photos from Wikimedia Commons (CC BY-SA 3.0): an Arabic information
+  // sign at Ancient Acre (by Yuval Y) and an Irish occupiers' liability notice
+  // (by Jnestorius). Each is read alone (same language) and translated. Skipped
+  // with a note if Wikimedia cannot be reached; OCR quality is logged.
+  const photos = [
+    ['acre-sign.jpg', 'https://upload.wikimedia.org/wikipedia/commons/4/40/Ancient_Acre_Hill_sign_-_Arabic.jpg', 'Arabic', 'English', /[A-Za-z]/u],
+    ['ireland-notice.jpg', 'https://upload.wikimedia.org/wikipedia/commons/1/12/Occupiers_Liability_Warning_Notice_Ireland.JPG', 'English', 'Arabic', /[\u0600-\u06ff]/u],
+  ];
+  for (const [name, photoUrl, source, target, script] of photos) {
+    let buffer;
+    try {
+      const response = await fetch(photoUrl, { headers: { 'User-Agent': 'VertaCI/1.0 (https://github.com/AimanAlosaily/AI-Powered-Machine-Translation)' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      buffer = Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      console.log(JSON.stringify({ skipped: name, reason: String(error) }));
+      continue;
+    }
+    const photo = { mimeType: 'image/jpeg', buffer };
+    await translate(`${name} (OCR only)`, source, source, '[photo]', source === 'Arabic' ? /[\u0600-\u06ff]/u : /[A-Za-z]/u, photo);
+    await translate(name, source, target, '[photo]', script, photo);
+  }
   // Numbered sentences prove completeness: an omitted sentence loses its number.
   // (A length check passed while 14 of 40 repeated sentences were dropped.)
   await translate('long.txt', 'English', 'Arabic', Array.from({ length: 40 }, (_, i) => `Invoice number ${i + 1} was paid on time.`).join(' '), /[\u0600-\u06ff]/u);
