@@ -71,9 +71,26 @@ on a Linux CI machine, **not a benchmark on a 6 GB device**.
   with lean ONNX Runtime options, so it cannot meet the 6 GB target. The app is
   Arabic ↔ English only.
 
+## Image OCR (added 24 October 2026)
+
+- **Bug fixed:** tesseract.js 7 loads a "relaxed SIMD" engine build in current
+  Chrome, Edge and Electron, but only 4 of its 8 builds were copied, so image
+  OCR crashed there with "Translation failed". All builds are now copied.
+- **Generated images** (website test, offline; Windows app test): English and
+  Arabic text are read exactly and translated, e.g. "الاجتماع غدا في الساعة
+  العاشرة صباحا / يرجى إحضار العقد الموقع" → "Meeting tomorrow at 10:00 a.m. /
+  Please bring the signed contract."
+- **Real photos** (Wikimedia Commons, CC BY-SA 3.0): an Arabic sign at Ancient
+  Acre and an Irish occupiers' liability notice. Before filtering, logos, the
+  frame and the wall produced junk lines that the model turned into nonsense.
+  With the confidence filter (`app/ocr-clean.ts`, tuned on this output, which
+  is kept as a test fixture) 29 of 57 Arabic lines and 7 of 22 English lines
+  are skipped and the rest translates readably, e.g. "The hill you are now
+  looking for is the place of the ancient city of Acca." Remaining errors come
+  from OCR misreads and model limits ("IF YOU PASS" → "إذا نجحت").
+
 ## Not verified
 
 - A real device with 6 GB of RAM, or browsers other than Chromium.
 - Translation quality beyond the samples above (no benchmark was run).
-- PDF text extraction and image OCR end to end with the new model (their code
-  paths are unchanged and are now saved for offline use).
+- PDF text extraction end to end with the new model.
