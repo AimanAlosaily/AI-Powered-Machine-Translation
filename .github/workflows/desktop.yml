@@ -1,0 +1,132 @@
+name: Windows app
+
+# Builds the Verta installer (.exe) with both translation models inside,
+# installs it silently on Windows, and tests real translations in the installed
+# app. Pushing a tag like v1.0.0 also publishes the installer as a GitHub
+# Release.
+on:
+  push:
+    branches: [main, "feat/**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Build, install and test Verta.exe
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(node -p "require('./desktop/package.json').version")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME does not match desktop/package.json version $version"; exit 1; }
+
+      - name: Build the desktop web app (no base path, bundled models)
+        env:
+          NEXT_PUBLIC_STATIC_EXPORT: "true"
+          NEXT_PUBLIC_DESKTOP: "true"
+        run: pnpm run build:github
+
+      - name: Download and verify the pinned models
+        run: node --import tsx scripts/fetch-models.mjs out/models
+
+      - name: Assemble the Electron app
+        run: |
+          cp -r out desktop/web
+          mkdir -p desktop/build
+          cp public/icon-512.png desktop/build/icon.png
+
+      - name: Install Electron and electron-builder
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+
+      - name: Build the installer
+        working-directory: desktop
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Install silently
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem desktop/dist -Filter 'Verta-Setup-*.exe' | Select-Object -First 1
+          if (-not $installer) { throw "Installer not found" }
+          "Installer: $($installer.Name) $([math]::Round($installer.Length / 1MB)) MB"
+          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
+          Start-Sleep -Seconds 5
+          Get-Process Verta -ErrorAction SilentlyContinue | Stop-Process -Force
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Verta.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "Verta.exe not found after install" }
+          "Installed: $($exe.FullName)"
+          "VERTA_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Test the installed app
+        run: |
+          mkdir -p work
+          node tests/desktop.e2e.mjs 2>&1 | tee work/desktop-test.log
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: verta-windows
+          path: desktop/dist/Verta-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload the test screenshot and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-test
+          path: work/
+          if-no-files-found: ignore
+
+  release:
+    name: Publish the GitHub Release
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: verta-windows
+          path: dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          **Verta for Windows**: private Arabic ↔ English document translation that runs entirely on your computer.
+
+          - Download `Verta-Setup-*.exe` below and run it. It installs for your user account (no admin rights) and adds Start menu and desktop shortcuts.
+          - Both open-weight translation models are included, so Verta works with no internet from the first launch. The app blocks all connections to other hosts.
+          - Windows may show "Windows protected your PC" because the installer is not code-signed. Choose **More info → Run anyway**.
+
+          Windows 10 or 11, 64-bit.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/*.exe \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Verta $GITHUB_REF_NAME for Windows" \
+            --notes-file notes.md

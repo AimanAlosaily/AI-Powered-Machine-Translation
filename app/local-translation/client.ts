@@ -1,4 +1,5 @@
 import type { Stage, WorkerReply, WorkerRequest } from "./models";
+import { IS_DESKTOP } from "../runtime";
 
 let activeWorker: Worker | undefined;
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -65,7 +66,12 @@ export async function createCompactTranslator(
   }
 
   try {
-    await request({ id: ++nextId, type: "init", stage });
+    await request({
+      id: ++nextId,
+      type: "init",
+      stage,
+      ...(IS_DESKTOP ? { localModelPath: `${BASE_PATH}/models/` } : {}),
+    });
   } catch (error) {
     destroy();
     if (error instanceof Error && /fetch|network/i.test(error.message)) {

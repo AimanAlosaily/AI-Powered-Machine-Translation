@@ -62,6 +62,28 @@ saved files. The status checks the actual cached model files and does not rely
 on a permanent “downloaded” flag. If a download was interrupted, connect and
 retry.
 
+## Windows app
+
+Verta is also a Windows program. Download `Verta-Setup-<version>.exe` from the
+[latest release](https://github.com/AimanAlosaily/AI-Powered-Machine-Translation/releases/latest)
+and run it: it installs for your user account (no administrator rights) and
+adds Start menu and desktop shortcuts. Windows 10 or 11, 64-bit.
+
+- **Both models are inside the installer**, so it translates with no internet
+  from the first launch. Nothing is downloaded after installation.
+- The app serves its own files from `127.0.0.1` inside an Electron window and
+  **blocks every request to another host**, so documents never leave the PC.
+- The installer is not code-signed, so Windows SmartScreen may show "Windows
+  protected your PC". Choose **More info → Run anyway**.
+
+The `Windows app` workflow (`.github/workflows/desktop.yml`) builds the
+installer on Windows, downloads the pinned models and checks every file
+against Hugging Face's published hashes (`scripts/fetch-models.mjs`), installs
+the app silently, and runs `tests/desktop.e2e.mjs` against the installed
+`Verta.exe`. Pushing a tag such as `v1.0.0` (matching `desktop/package.json`)
+publishes the installer as a GitHub Release. The Electron shell is in
+`desktop/main.mjs`.
+
 ## Supported files
 
 - PDF, DOCX, PPTX, ODT, RTF, plain text, Markdown, and CSV

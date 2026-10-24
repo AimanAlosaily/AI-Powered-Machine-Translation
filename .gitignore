@@ -42,3 +42,10 @@ next-env.d.ts
 /outputs/
 /work/
 /public/offline/
+
+# desktop app build output
+/desktop/web/
+/desktop/dist/
+/desktop/build/
+/desktop/node_modules/
+/desktop/package-lock.json

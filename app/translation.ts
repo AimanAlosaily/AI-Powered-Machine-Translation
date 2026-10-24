@@ -1,6 +1,10 @@
 import { strFromU8, unzipSync } from "fflate";
 import { createCompactTranslator, supportsCompactTranslation } from "./local-translation/client";
-import { isPlanCached, planSizeMB, translationPlan } from "./local-translation/models";
+import { isPlanCached, planSizeMB, translationPlan, type Stage } from "./local-translation/models";
+import { IS_DESKTOP } from "./runtime";
+
+// The desktop app ships both models, so they are always ready there.
+const modelsReady = (plan: Stage[]) => (IS_DESKTOP ? Promise.resolve(true) : isPlanCached(plan));
 
 export { planSizeMB, translationPlan } from "./local-translation/models";
 
@@ -422,7 +426,7 @@ export async function getPairAvailability(
   if (!plan) return "unavailable";
   if (plan.length === 0) return "available";
   if (!supportsCompactTranslation()) return "unsupported";
-  return (await isPlanCached(plan)) ? "available" : "downloadable";
+  return (await modelsReady(plan)) ? "available" : "downloadable";
 }
 
 const LANGUAGE_NAMES: Record<string, string> = { ar: "Arabic", en: "English" };
@@ -438,7 +442,7 @@ export const OFFLINE_PACK_MB = DIRECTIONS.reduce(
 /** True when both directions' model files are in this browser's cache. */
 export async function isOfflineReady() {
   const cached = await Promise.all(
-    DIRECTIONS.map(([source, target]) => isPlanCached(translationPlan(source, target)!)),
+    DIRECTIONS.map(([source, target]) => modelsReady(translationPlan(source, target)!)),
   );
   return cached.every(Boolean);
 }
@@ -457,7 +461,7 @@ export async function saveForOffline(
   }
   for (const [source, target] of DIRECTIONS) {
     const plan = translationPlan(source, target)!;
-    if (await isPlanCached(plan)) continue;
+    if (await modelsReady(plan)) continue;
     for (const stage of plan) {
       abortIfNeeded(signal);
       const label = `${LANGUAGE_NAMES[stage.source]} → ${LANGUAGE_NAMES[stage.target]}`;
@@ -500,7 +504,7 @@ export async function translateFile({
     signal,
     onProgress,
   );
-  if (plan.length > 0 && !navigator.onLine && !(await isPlanCached(plan))) {
+  if (plan.length > 0 && !navigator.onLine && !(await modelsReady(plan))) {
     throw new Error("This translation model is not fully cached. Connect once and complete a translation in this direction before using it offline.");
   }
 
