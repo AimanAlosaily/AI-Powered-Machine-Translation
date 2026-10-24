@@ -2,12 +2,14 @@ name: Windows app
 
 # Builds the Verta installer (.exe) with both translation models inside,
 # installs it silently on Windows, and tests real translations in the installed
-# app. Pushing a tag like v1.0.0 also publishes the installer as a GitHub
-# Release.
+# app. Publishing a GitHub Release (or pushing a tag) named like v1.0.0 also
+# attaches the tested installer to that release.
 on:
   push:
     branches: [main, "feat/**"]
     tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -113,10 +115,15 @@ jobs:
         with:
           name: verta-windows
           path: dist
-      - name: Create the release
+      - name: Attach the installer to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A release published on GitHub already exists: just add the file.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.exe --repo "$GITHUB_REPOSITORY" --clobber
+            exit 0
+          fi
           cat > notes.md <<'EOF'
           **Verta for Windows**: private Arabic ↔ English document translation that runs entirely on your computer.
 
