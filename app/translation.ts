@@ -334,6 +334,14 @@ async function extractImage(
     const output = await worker.recognize(file);
     abortIfNeeded(signal);
     return cleanText(output.data.text);
+  } catch (error) {
+    abortIfNeeded(signal);
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    // tesseract.js can reject with strings or plain objects; give a clear message.
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `The image reader could not process this file. If you are offline, connect once so Verta can save its OCR files, then try again. (${detail.slice(0, 160)})`,
+    );
   } finally {
     signal.removeEventListener("abort", handleAbort);
     await worker?.terminate();

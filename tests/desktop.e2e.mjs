@@ -38,10 +38,29 @@ try {
   await page.getByText("Both models are built into the app", { exact: false }).waitFor({ timeout: 30000 });
   assert.equal(await page.getByRole("button", { name: /Save both/ }).count(), 0, "desktop app must not offer a model download");
 
-  async function translate(name, source, target, text, script) {
+  // Draws known text on a white canvas and returns it as a PNG for OCR.
+  async function textImage(lines, rtl) {
+    const dataUrl = await page.evaluate(({ lines, rtl }) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1400;
+      canvas.height = 80 + lines.length * 90;
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#111111";
+      context.font = '48px Arial, "Segoe UI", sans-serif';
+      context.direction = rtl ? "rtl" : "ltr";
+      context.textAlign = rtl ? "right" : "left";
+      lines.forEach((line, index) => context.fillText(line, rtl ? canvas.width - 60 : 60, 90 + index * 90));
+      return canvas.toDataURL("image/png");
+    }, { lines, rtl });
+    return Buffer.from(dataUrl.split(",")[1], "base64");
+  }
+
+  async function translate(name, source, target, text, script, file) {
     await page.locator(".field-grid select").nth(0).selectOption(source);
     await page.locator(".field-grid select").nth(1).selectOption(target);
-    await page.locator("input[type=file]").setInputFiles({ name, mimeType: "text/plain", buffer: Buffer.from(text) });
+    await page.locator("input[type=file]").setInputFiles(file ? { name, ...file } : { name, mimeType: "text/plain", buffer: Buffer.from(text) });
     const started = Date.now();
     await page.getByRole("button", { name: "Translate on this device", exact: true }).click();
     await page.locator(".result-section, .error-banner").waitFor({ timeout: 300000 });
@@ -61,6 +80,13 @@ try {
     /[\u0600-\u06ff]/u,
   );
   assert.deepEqual(missingNumbers(long, 20), [], "sentences missing from the long translation");
+
+  // Arabic image OCR: Arabic → Arabic returns the OCR text so the words can be
+  // checked; Arabic → English translates it.
+  const notice = { mimeType: "image/png", buffer: await textImage(["الاجتماع غدا في الساعة العاشرة صباحا", "يرجى إحضار العقد الموقع"], true) };
+  const ocrText = await translate("notice.png", "Arabic", "Arabic", "[image]", /الاجتماع/u, notice);
+  assert.match(ocrText, /العقد/u, "OCR missed the second line");
+  await translate("notice-en.png", "Arabic", "English", ocrText, /meeting/iu, notice);
 
   assert.deepEqual(outside, [], "the desktop app contacted another host");
   assert.deepEqual(errors, []);

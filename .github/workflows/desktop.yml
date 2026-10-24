@@ -6,7 +6,7 @@ name: Windows app
 # attaches the tested installer to that release.
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main, "feat/**", "fix/**"]
     tags: ["v*"]
   release:
     types: [published]
