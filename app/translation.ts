@@ -2,6 +2,7 @@ import { strFromU8, unzipSync } from "fflate";
 import { createCompactTranslator, supportsCompactTranslation } from "./local-translation/client";
 import { isPlanCached, planSizeMB, translationPlan, type Stage } from "./local-translation/models";
 import { IS_DESKTOP } from "./runtime";
+import { cleanOcrText } from "./ocr-clean";
 
 // The desktop app ships both models, so they are always ready there.
 const modelsReady = (plan: Stage[]) => (IS_DESKTOP ? Promise.resolve(true) : isPlanCached(plan));
@@ -74,6 +75,8 @@ type ExtractedDocument = {
   sections: TranslationSection[];
   plainText: string;
   usedOcr: boolean;
+  /** Unclear OCR lines (logos, edges, blur) left out before translation. */
+  ocrSkippedLines: number;
 };
 
 type GlossaryEntry = {
@@ -331,9 +334,20 @@ async function extractImage(
       },
     });
     abortIfNeeded(signal);
-    const output = await worker.recognize(file);
+    const output = await worker.recognize(file, {}, { text: true, blocks: true });
     abortIfNeeded(signal);
-    return cleanText(output.data.text);
+    // Photos contain logos, frames and blur that OCR turns into junk; keep only
+    // confidently read text so it is not translated into nonsense.
+    const cleaned = cleanOcrText(output.data.blocks ?? [], sourceCode === "ar" ? "ar" : "en");
+    return { text: cleanText(cleaned.text), skippedLines: cleaned.skippedLines };
+  } catch (error) {
+    abortIfNeeded(signal);
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    // tesseract.js can reject with strings or plain objects; give a clear message.
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `The image reader could not process this file. If you are offline, connect once so Verta can save its OCR files, then try again. (${detail.slice(0, 160)})`,
+    );
   } finally {
     signal.removeEventListener("abort", handleAbort);
     await worker?.terminate();
@@ -349,11 +363,17 @@ async function extractDocument(
   abortIfNeeded(signal);
   const extension = getFileExtension(file.name);
   let text = "";
+  let ocrSkippedLines = 0;
 
   onProgress({ progress: 5, message: "Reading the file on this device" });
 
   if (isImageFile(file)) {
-    text = await extractImage(file, sourceCode, signal, onProgress);
+    const ocr = await extractImage(file, sourceCode, signal, onProgress);
+    if (!ocr.text) {
+      throw new Error("No clear text was found in this image. Try a sharper, straight-on photo with good light, and check the source language.");
+    }
+    text = ocr.text;
+    ocrSkippedLines = ocr.skippedLines;
   } else if (extension === "pdf") {
     text = await extractPdf(file, signal, onProgress);
   } else if (extension === "docx") {
@@ -380,6 +400,7 @@ async function extractDocument(
     sections,
     plainText: sections.map((section) => section.content).join("\n\n"),
     usedOcr: isImageFile(file),
+    ocrSkippedLines,
   };
 }
 
@@ -405,6 +426,25 @@ function replaceTerm(text: string, automatic: string, preferred: string) {
     new RegExp(escapeRegExp(automatic.trim()), "giu"),
     preferred,
   );
+}
+
+/**
+ * Signs and notices are often in ALL CAPS, which these models (trained on
+ * normally cased text) translate badly: "YOU ARE ON A PREMISES" came back as
+ * "you are on appetizers". Lines that are mostly capital letters are turned
+ * into sentence case before English is translated; Arabic has no case.
+ */
+export function softenAllCaps(text: string) {
+  return text
+    .split("\n")
+    .map((line) => {
+      const letters = line.match(/[A-Za-z]/g) ?? [];
+      const capitals = line.match(/[A-Z]/g) ?? [];
+      if (letters.length < 4 || capitals.length / letters.length < 0.8) return line;
+      const lower = line.toLowerCase();
+      return lower.replace(/[a-z]/, (first) => first.toUpperCase());
+    })
+    .join("\n");
 }
 
 function extractNumbers(text: string) {
@@ -519,7 +559,9 @@ export async function translateFile({
   // each term's automatic translation can be swapped for the preferred one.
   let texts = [
     ...glossary.map((entry) => entry.source),
-    ...extracted.sections.map((section) => section.content),
+    ...extracted.sections.map((section) =>
+      options.sourceCode === "en" && plan.length > 0 ? softenAllCaps(section.content) : section.content,
+    ),
   ];
 
   for (const stage of plan) {
@@ -573,6 +615,12 @@ export async function translateFile({
   if (extracted.usedOcr) {
     reviewFlags.push(
       "Image text was read with local OCR. Check names, small print, and low-contrast areas.",
+    );
+  }
+  if (extracted.ocrSkippedLines > 0) {
+    const count = extracted.ocrSkippedLines;
+    reviewFlags.push(
+      `Skipped ${count} unclear line${count === 1 ? "" : "s"} in the image (logos, edges or blurry text) so ${count === 1 ? "it was" : "they were"} not translated as nonsense.`,
     );
   }
   reviewFlags.push(

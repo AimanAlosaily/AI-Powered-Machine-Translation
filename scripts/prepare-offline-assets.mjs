@@ -1,4 +1,4 @@
-import { cp, mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, writeFile } from "node:fs/promises";
 import { deflateSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,13 @@ const destination = join(projectRoot, "public", "offline");
 const fromRoot = (...parts) => join(projectRoot, "node_modules", ...parts);
 
 await mkdir(join(destination, "tesseract-core"), { recursive: true });
+
+const tesseractCore = fromRoot(
+  ".pnpm",
+  "tesseract.js-core@7.0.0",
+  "node_modules",
+  "tesseract.js-core",
+);
 
 const assets = [
   ...["ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm"].map((filename) => [
@@ -23,21 +30,15 @@ const assets = [
     fromRoot("tesseract.js", "dist", "worker.min.js"),
     join(destination, "worker.min.js"),
   ],
-  ...[
-    "tesseract-core.wasm.js",
-    "tesseract-core-simd.wasm.js",
-    "tesseract-core-lstm.wasm.js",
-    "tesseract-core-simd-lstm.wasm.js",
-  ].map((filename) => [
-    fromRoot(
-      ".pnpm",
-      "tesseract.js-core@7.0.0",
-      "node_modules",
-      "tesseract.js-core",
-      filename,
-    ),
-    join(destination, "tesseract-core", filename),
-  ]),
+  // tesseract.js picks the fastest engine build the browser supports,
+  // including the relaxed-SIMD builds that current Chrome and Edge use, so
+  // copy every build rather than a fixed list.
+  ...(await readdir(tesseractCore))
+    .filter((filename) => /^tesseract-core.*\.wasm\.js$/.test(filename))
+    .map((filename) => [
+      join(tesseractCore, filename),
+      join(destination, "tesseract-core", filename),
+    ]),
   [
     fromRoot(
       "@tesseract.js-data",

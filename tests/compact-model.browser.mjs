@@ -85,10 +85,30 @@ function assertEveryNumber(output, count, label) {
   assert.deepEqual(missing, [], `${label}: sentences missing from the translation`);
 }
 
-async function translate(name, source, target, text, expectedScript) {
+// Draws text on a white canvas in the page and returns it as a PNG, so image
+// OCR can be tested with known words.
+async function textImage(lines, { rtl = false } = {}) {
+  const dataUrl = await page.evaluate(({ lines, rtl }) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1400;
+    canvas.height = 80 + lines.length * 90;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = '#111111';
+    context.font = '48px Arial, "Segoe UI", "DejaVu Sans", "Noto Sans Arabic", sans-serif';
+    context.direction = rtl ? 'rtl' : 'ltr';
+    context.textAlign = rtl ? 'right' : 'left';
+    lines.forEach((line, index) => context.fillText(line, rtl ? canvas.width - 60 : 60, 90 + index * 90));
+    return canvas.toDataURL('image/png');
+  }, { lines, rtl });
+  return Buffer.from(dataUrl.split(',')[1], 'base64');
+}
+
+async function translate(name, source, target, text, expectedScript, file) {
   await page.locator('.field-grid select').nth(0).selectOption(source);
   await page.locator('.field-grid select').nth(1).selectOption(target);
-  await page.locator('input[type=file]').setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.from(text) });
+  await page.locator('input[type=file]').setInputFiles(file ? { name, ...file } : { name, mimeType: 'text/plain', buffer: Buffer.from(text) });
   const started = Date.now();
   peak = { totalMiB: 0, byType: {} };
   await page.getByRole('button', { name: 'Translate on this device', exact: true }).click();
@@ -99,6 +119,7 @@ async function translate(name, source, target, text, expectedScript) {
   assert.ok(output.trim().length > 0);
   samples.push({ name, source, target, input: text, output, elapsedMs: Date.now() - started, peakPssMiB: Math.round(peak.totalMiB), peakPssByTypeMiB: peak.byType });
   console.log(JSON.stringify(samples.at(-1)));
+  return output;
 }
 
 try {
@@ -125,6 +146,34 @@ try {
   await translate('arabic.txt', 'Arabic', 'English', 'هذا البرنامج يترجم المستندات على جهازك دون إرسالها إلى الإنترنت.', /[A-Za-z]/u);
   await translate('offline-en.txt', 'English', 'Arabic', 'Thank you for your help.', /[\u0600-\u06ff]/u);
   await translate('offline-ar.txt', 'Arabic', 'English', 'شكرا على مساعدتك.', /[A-Za-z]/u);
+  // Image OCR, offline: English → English returns the OCR text itself, so the
+  // words can be checked; English → Arabic translates it.
+  const notice = { mimeType: 'image/png', buffer: await textImage(['The meeting is tomorrow at ten.', 'Please bring the signed contract.']) };
+  const ocrText = await translate('notice.png', 'English', 'English', '[image]', /meeting/iu, notice);
+  assert.match(ocrText, /contract/iu, 'OCR missed the second line');
+  await translate('notice-ar.png', 'English', 'Arabic', ocrText, /[\u0600-\u06ff]/u, notice);
+  // Real photos from Wikimedia Commons (CC BY-SA 3.0): an Arabic information
+  // sign at Ancient Acre (by Yuval Y) and an Irish occupiers' liability notice
+  // (by Jnestorius). Each is read alone (same language) and translated. Skipped
+  // with a note if Wikimedia cannot be reached; OCR quality is logged.
+  const photos = [
+    ['acre-sign.jpg', 'https://upload.wikimedia.org/wikipedia/commons/4/40/Ancient_Acre_Hill_sign_-_Arabic.jpg', 'Arabic', 'English', /[A-Za-z]/u],
+    ['ireland-notice.jpg', 'https://upload.wikimedia.org/wikipedia/commons/1/12/Occupiers_Liability_Warning_Notice_Ireland.JPG', 'English', 'Arabic', /[\u0600-\u06ff]/u],
+  ];
+  for (const [name, photoUrl, source, target, script] of photos) {
+    let buffer;
+    try {
+      const response = await fetch(photoUrl, { headers: { 'User-Agent': 'VertaCI/1.0 (https://github.com/AimanAlosaily/AI-Powered-Machine-Translation)' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      buffer = Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      console.log(JSON.stringify({ skipped: name, reason: String(error) }));
+      continue;
+    }
+    const photo = { mimeType: 'image/jpeg', buffer };
+    await translate(`ocr-only-${name}`, source, source, '[photo]', source === 'Arabic' ? /[\u0600-\u06ff]/u : /[A-Za-z]/u, photo);
+    await translate(name, source, target, '[photo]', script, photo);
+  }
   // Numbered sentences prove completeness: an omitted sentence loses its number.
   // (A length check passed while 14 of 40 repeated sentences were dropped.)
   await translate('long.txt', 'English', 'Arabic', Array.from({ length: 40 }, (_, i) => `Invoice number ${i + 1} was paid on time.`).join(' '), /[\u0600-\u06ff]/u);

@@ -87,7 +87,11 @@ publishes the installer as a GitHub Release. The Electron shell is in
 ## Supported files
 
 - PDF, DOCX, PPTX, ODT, RTF, plain text, Markdown, and CSV
-- PNG, JPG, JPEG, and WebP images with English or Arabic source text
+- PNG, JPG, JPEG, and WebP images with English or Arabic source text. For
+  photos, lines the OCR reader is unsure of (logos, frames, walls, blur) are
+  skipped so they are not translated as nonsense, wrapped sentences are
+  rejoined, and ALL-CAPS English is translated in sentence case. The result
+  says how many unclear lines were skipped.
 - Word (`.docx`) and plain-text output
 
 Legacy binary `.doc` and `.ppt` files are not supported in offline mode.
