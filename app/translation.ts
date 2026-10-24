@@ -2,6 +2,7 @@ import { strFromU8, unzipSync } from "fflate";
 import { createCompactTranslator, supportsCompactTranslation } from "./local-translation/client";
 import { isPlanCached, planSizeMB, translationPlan, type Stage } from "./local-translation/models";
 import { IS_DESKTOP } from "./runtime";
+import { cleanOcrText } from "./ocr-clean";
 
 // The desktop app ships both models, so they are always ready there.
 const modelsReady = (plan: Stage[]) => (IS_DESKTOP ? Promise.resolve(true) : isPlanCached(plan));
@@ -74,6 +75,8 @@ type ExtractedDocument = {
   sections: TranslationSection[];
   plainText: string;
   usedOcr: boolean;
+  /** Unclear OCR lines (logos, edges, blur) left out before translation. */
+  ocrSkippedLines: number;
 };
 
 type GlossaryEntry = {
@@ -331,9 +334,12 @@ async function extractImage(
       },
     });
     abortIfNeeded(signal);
-    const output = await worker.recognize(file);
+    const output = await worker.recognize(file, {}, { text: true, blocks: true });
     abortIfNeeded(signal);
-    return cleanText(output.data.text);
+    // Photos contain logos, frames and blur that OCR turns into junk; keep only
+    // confidently read text so it is not translated into nonsense.
+    const cleaned = cleanOcrText(output.data.blocks ?? [], sourceCode === "ar" ? "ar" : "en");
+    return { text: cleanText(cleaned.text), skippedLines: cleaned.skippedLines };
   } catch (error) {
     abortIfNeeded(signal);
     if (error instanceof DOMException && error.name === "AbortError") throw error;
@@ -357,11 +363,17 @@ async function extractDocument(
   abortIfNeeded(signal);
   const extension = getFileExtension(file.name);
   let text = "";
+  let ocrSkippedLines = 0;
 
   onProgress({ progress: 5, message: "Reading the file on this device" });
 
   if (isImageFile(file)) {
-    text = await extractImage(file, sourceCode, signal, onProgress);
+    const ocr = await extractImage(file, sourceCode, signal, onProgress);
+    if (!ocr.text) {
+      throw new Error("No clear text was found in this image. Try a sharper, straight-on photo with good light, and check the source language.");
+    }
+    text = ocr.text;
+    ocrSkippedLines = ocr.skippedLines;
   } else if (extension === "pdf") {
     text = await extractPdf(file, signal, onProgress);
   } else if (extension === "docx") {
@@ -388,6 +400,7 @@ async function extractDocument(
     sections,
     plainText: sections.map((section) => section.content).join("\n\n"),
     usedOcr: isImageFile(file),
+    ocrSkippedLines,
   };
 }
 
@@ -581,6 +594,12 @@ export async function translateFile({
   if (extracted.usedOcr) {
     reviewFlags.push(
       "Image text was read with local OCR. Check names, small print, and low-contrast areas.",
+    );
+  }
+  if (extracted.ocrSkippedLines > 0) {
+    const count = extracted.ocrSkippedLines;
+    reviewFlags.push(
+      `Skipped ${count} unclear line${count === 1 ? "" : "s"} in the image (logos, edges or blurry text) so ${count === 1 ? "it was" : "they were"} not translated as nonsense.`,
     );
   }
   reviewFlags.push(
