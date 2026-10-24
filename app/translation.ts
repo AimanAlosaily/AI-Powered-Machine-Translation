@@ -428,6 +428,25 @@ function replaceTerm(text: string, automatic: string, preferred: string) {
   );
 }
 
+/**
+ * Signs and notices are often in ALL CAPS, which these models (trained on
+ * normally cased text) translate badly: "YOU ARE ON A PREMISES" came back as
+ * "you are on appetizers". Lines that are mostly capital letters are turned
+ * into sentence case before English is translated; Arabic has no case.
+ */
+export function softenAllCaps(text: string) {
+  return text
+    .split("\n")
+    .map((line) => {
+      const letters = line.match(/[A-Za-z]/g) ?? [];
+      const capitals = line.match(/[A-Z]/g) ?? [];
+      if (letters.length < 4 || capitals.length / letters.length < 0.8) return line;
+      const lower = line.toLowerCase();
+      return lower.replace(/[a-z]/, (first) => first.toUpperCase());
+    })
+    .join("\n");
+}
+
 function extractNumbers(text: string) {
   return text.match(/\p{N}+(?:[.,]\p{N}+)*/gu) ?? [];
 }
@@ -540,7 +559,9 @@ export async function translateFile({
   // each term's automatic translation can be swapped for the preferred one.
   let texts = [
     ...glossary.map((entry) => entry.source),
-    ...extracted.sections.map((section) => section.content),
+    ...extracted.sections.map((section) =>
+      options.sourceCode === "en" && plan.length > 0 ? softenAllCaps(section.content) : section.content,
+    ),
   ];
 
   for (const stage of plan) {

@@ -61,3 +61,11 @@ test("clean text and empty input pass through sensibly", () => {
   assert.deepEqual(clean, { text: "The meeting is tomorrow.", keptLines: 1, skippedLines: 0 });
   assert.deepEqual(cleanOcrText([], "ar"), { text: "", keptLines: 0, skippedLines: 0 });
 });
+
+test("all-caps English lines become sentence case before translation", async () => {
+  const { softenAllCaps } = await import("../app/translation");
+  assert.equal(
+    softenAllCaps("YOU ARE ON A PREMISES\nSECTION 5(2) OF THE ACT\nThe meeting is with NASA.\nOK"),
+    "You are on a premises\nSection 5(2) of the act\nThe meeting is with NASA.\nOK",
+  );
+});
