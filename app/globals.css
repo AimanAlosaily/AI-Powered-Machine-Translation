@@ -638,6 +638,13 @@ button {
   color: var(--ink);
 }
 
+.desktop-link {
+  color: var(--ink);
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .network-state {
   display: inline-flex;
   align-items: center;

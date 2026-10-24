@@ -85,7 +85,8 @@ export async function isPlanCached(plan: Stage[]) {
 }
 
 export type WorkerRequest =
-  | { id: number; type: "init"; stage: Stage }
+  // localModelPath is set in the desktop app, which ships the model files.
+  | { id: number; type: "init"; stage: Stage; localModelPath?: string }
   | { id: number; type: "translate"; text: string };
 
 export type WorkerReply =

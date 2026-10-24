@@ -49,6 +49,7 @@ import {
   validateFile,
 } from "./translation";
 import { LANGUAGES } from "./languages";
+import { IS_DESKTOP } from "./runtime";
 
 
 const RTL_CODES = new Set(["ar"]);
@@ -103,7 +104,9 @@ function statusCopy(status: PairStatus, online: boolean, plan: Plan) {
     return { title: "Checking saved models", detail: "Looking for this pair’s model files on this device." };
   }
   if (status === "available") {
-    return { title: "Model ready offline", detail: "This direction’s open-weight model is saved on this device. No GPU or API key needed." };
+    return IS_DESKTOP
+      ? { title: "Built into this app", detail: "Both open-weight models are included. Translation runs on this computer with no internet." }
+      : { title: "Model ready offline", detail: "This direction’s open-weight model is saved on this device. No GPU or API key needed." };
   }
   return {
     title: online ? `One-time download · about ${planSizeMB(plan)} MB` : "Connect once to download this model",
@@ -182,7 +185,9 @@ export function TranslatorApp() {
     window.addEventListener("beforeinstallprompt", handleInstallPrompt);
     window.addEventListener("appinstalled", handleInstalled);
 
-    if ("serviceWorker" in navigator) {
+    // The desktop app already has every file on disk; only the website needs
+    // a service worker to work offline.
+    if (!IS_DESKTOP && "serviceWorker" in navigator) {
       void navigator.serviceWorker.register(`${BASE_PATH}/sw.js`, {
         scope: `${BASE_PATH || ""}/`,
       });
@@ -446,7 +451,7 @@ export function TranslatorApp() {
         <div className="nav-center" aria-label="Product attributes">
           <span>No keys</span>
           <span>Device-only</span>
-          <span>Offline after setup</span>
+          <span>{IS_DESKTOP ? "Works offline" : "Offline after setup"}</span>
         </div>
         {installPrompt && !isInstalled ? (
           <button
@@ -655,7 +660,11 @@ export function TranslatorApp() {
               {offlineReady ? (
                 <>
                   <CheckCircle2 size={16} aria-hidden="true" />
-                  <span>Both directions are saved. Verta can translate with no internet.</span>
+                  <span>
+                    {IS_DESKTOP
+                      ? "Both models are built into the app. No internet needed."
+                      : "Both directions are saved. Verta can translate with no internet."}
+                  </span>
                 </>
               ) : savingMessage ? (
                 <>
@@ -745,9 +754,23 @@ export function TranslatorApp() {
           )}
 
           <p className="consent-note">
-            Nothing is uploaded. Each direction downloads its open-weight model
-            (about 111 MB) once from Hugging Face; keep site data to reuse it
-            offline. Image OCR reads English and Arabic.
+            {IS_DESKTOP
+              ? "Nothing is uploaded. Both open-weight models are included in the app, and it never connects to the internet. Image OCR reads English and Arabic."
+              : "Nothing is uploaded. Each direction downloads its open-weight model (about 111 MB) once from Hugging Face; keep site data to reuse it offline. Image OCR reads English and Arabic."}
+            {!IS_DESKTOP && (
+              <>
+                {" "}
+                <a
+                  className="desktop-link"
+                  href="https://github.com/AimanAlosaily/AI-Powered-Machine-Translation/releases/latest"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Get the Windows app
+                </a>{" "}
+                with both models built in.
+              </>
+            )}
           </p>
         </form>
       </section>

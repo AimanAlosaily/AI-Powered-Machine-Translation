@@ -1,0 +1,56 @@
+{
+  "name": "verta-desktop",
+  "productName": "Verta",
+  "version": "1.0.0",
+  "description": "Private Arabic ↔ English document translation that runs on your computer.",
+  "author": "Aiman Alosaily",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.9.3",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "io.github.aimanalosaily.verta",
+    "productName": "Verta",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.mjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "web",
+        "to": "web"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Verta",
+      "artifactName": "Verta-Setup-${version}.exe"
+    }
+  }
+}

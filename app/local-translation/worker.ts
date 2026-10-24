@@ -92,6 +92,14 @@ scope.onmessage = async ({ data }) => {
   try {
     if (data.type === "init") {
       if (loaded) throw new Error("A model is already loaded in this worker.");
+      if (data.localModelPath) {
+        // Desktop app: read the bundled files and never contact Hugging Face.
+        // They are already on disk, so no browser cache copy is needed.
+        env.allowLocalModels = true;
+        env.allowRemoteModels = false;
+        env.localModelPath = data.localModelPath;
+        env.useBrowserCache = false;
+      }
       const { model } = data.stage;
       const progress_callback = (progress: import("@huggingface/transformers").ProgressInfo) => {
         let message = "Loading the translation model";
