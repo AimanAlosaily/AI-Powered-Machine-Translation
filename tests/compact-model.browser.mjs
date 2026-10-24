@@ -171,7 +171,7 @@ try {
       continue;
     }
     const photo = { mimeType: 'image/jpeg', buffer };
-    await translate(`${name} (OCR only)`, source, source, '[photo]', source === 'Arabic' ? /[\u0600-\u06ff]/u : /[A-Za-z]/u, photo);
+    await translate(`ocr-only-${name}`, source, source, '[photo]', source === 'Arabic' ? /[\u0600-\u06ff]/u : /[A-Za-z]/u, photo);
     await translate(name, source, target, '[photo]', script, photo);
   }
   // Numbered sentences prove completeness: an omitted sentence loses its number.
